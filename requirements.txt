@@ -1,0 +1,6 @@
+python-dotenv
+dropbox
+pdfplumber
+python-docx
+python-dateutil
+python-docx

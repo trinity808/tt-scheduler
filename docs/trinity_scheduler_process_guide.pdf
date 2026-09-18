@@ -1,0 +1,685 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R 7 0 R 9 0 R 11 0 R] /Count 4 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 4370 >>
+stream
+BT
+/F2 14 Tf
+1 0 0 1 54 734 Tm
+(Trinity Dropbox Scheduler - Process and File Guide) Tj
+/F1 10 Tf
+1 0 0 1 54 721 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 715 Tm
+(Generated: May 15, 2026) Tj
+/F1 10 Tf
+1 0 0 1 54 702 Tm
+(Project path: /Users/anand/Projects/trinity-dropbox-scheduler) Tj
+/F1 10 Tf
+1 0 0 1 54 689 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 676 Tm
+(Purpose: This project watches a Dropbox app folder for incoming PDF authorizations, extracts) Tj
+/F1 10 Tf
+1 0 0 1 54 663 Tm
+(appointment and claimant data, fills a Word report template, updates a same-day Word) Tj
+/F1 10 Tf
+1 0 0 1 54 650 Tm
+(schedule, uploads the schedule to Dropbox, and moves the source PDF to a processed folder.) Tj
+/F1 10 Tf
+1 0 0 1 54 637 Tm
+() Tj
+/F2 14 Tf
+1 0 0 1 54 625 Tm
+(Setup Document Review) Tj
+/F1 10 Tf
+1 0 0 1 54 612 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 606 Tm
+(Verdict: The existing "scheduler local enabler steps.docx" is mostly correct for installing) Tj
+/F1 10 Tf
+1 0 0 1 54 593 Tm
+(the project on a Mac, creating a virtual environment, setting up Dropbox API credentials,) Tj
+/F1 10 Tf
+1 0 0 1 54 580 Tm
+(creating Dropbox folders, testing manually, and installing the LaunchAgent background job.) Tj
+/F1 10 Tf
+1 0 0 1 54 567 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 554 Tm
+(Corrections needed because the code has changed:) Tj
+/F1 10 Tf
+1 0 0 1 54 541 Tm
+(- The .env section must now also include Gmail SMTP alert settings: SMTP_HOST, SMTP_PORT,) Tj
+/F1 10 Tf
+1 0 0 1 54 528 Tm
+(  SMTP_USE_TLS, SMTP_USERNAME, SMTP_PASSWORD, SMTP_FROM_EMAIL, and ALERT_TO_EMAIL.) Tj
+/F1 10 Tf
+1 0 0 1 54 515 Tm
+(- The config/settings.json example should include the health_check block with log_folder,) Tj
+/F1 10 Tf
+1 0 0 1 54 502 Tm
+(  email_notifications_enabled, and email_subject_prefix.) Tj
+/F1 10 Tf
+1 0 0 1 54 489 Tm
+(- The manual test section should mention that failures are written to) Tj
+/F1 10 Tf
+1 0 0 1 54 476 Tm
+(  logs/scheduler_error.log and, when SMTP is configured, an alert email is sent.) Tj
+/F1 10 Tf
+1 0 0 1 54 463 Tm
+(- requirements.txt contains python-docx twice. This does not break setup, but it can be) Tj
+/F1 10 Tf
+1 0 0 1 54 450 Tm
+(  cleaned up later.) Tj
+/F1 10 Tf
+1 0 0 1 54 437 Tm
+(- app/state_manager.py is present but not used by the current main workflow. This does not) Tj
+/F1 10 Tf
+1 0 0 1 54 424 Tm
+(  break the scheduler.) Tj
+/F1 10 Tf
+1 0 0 1 54 411 Tm
+() Tj
+/F2 14 Tf
+1 0 0 1 54 399 Tm
+(Runtime Flow) Tj
+/F1 10 Tf
+1 0 0 1 54 386 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 380 Tm
+(1. run_scheduler.sh is called manually or by macOS launchd.) Tj
+/F1 10 Tf
+1 0 0 1 54 367 Tm
+(2. run_scheduler.sh changes into the project folder, activates venv, and runs python) Tj
+/F1 10 Tf
+1 0 0 1 54 354 Tm
+(main.py.) Tj
+/F1 10 Tf
+1 0 0 1 54 341 Tm
+(3. main.py loads config/settings.json and sets up rotating logs.) Tj
+/F1 10 Tf
+1 0 0 1 54 328 Tm
+(4. Startup health checks confirm required config values, template paths, and the generated) Tj
+/F1 10 Tf
+1 0 0 1 54 315 Tm
+(report folder.) Tj
+/F1 10 Tf
+1 0 0 1 54 302 Tm
+(5. The Dropbox API lists PDF files from /incoming_pdfs.) Tj
+/F1 10 Tf
+1 0 0 1 54 289 Tm
+(6. Each PDF is downloaded into data/incoming_pdfs.) Tj
+/F1 10 Tf
+1 0 0 1 54 276 Tm
+(7. app/pdf_extractor.py reads PDF text and extracts case ID, authorization, patient name,) Tj
+/F1 10 Tf
+1 0 0 1 54 263 Tm
+(doctor, examiner initials, DOB, phone, services, total, allegations, schedule date, and) Tj
+/F1 10 Tf
+1 0 0 1 54 250 Tm
+(schedule time.) Tj
+/F1 10 Tf
+1 0 0 1 54 237 Tm
+(8. app/template_filler.py chooses the adult or child report template and replaces Word) Tj
+/F1 10 Tf
+1 0 0 1 54 224 Tm
+(placeholders.) Tj
+/F1 10 Tf
+1 0 0 1 54 211 Tm
+(9. app/schedule_generator.py creates or updates Schedule_<date>.docx with a 9-column table,) Tj
+/F1 10 Tf
+1 0 0 1 54 198 Tm
+(including an empty Comments column.) Tj
+/F1 10 Tf
+1 0 0 1 54 185 Tm
+(10. The schedule DOCX is uploaded to Dropbox /schedules.) Tj
+/F1 10 Tf
+1 0 0 1 54 172 Tm
+(11. The source PDF is moved from /incoming_pdfs to /processed_pdfs.) Tj
+/F1 10 Tf
+1 0 0 1 54 159 Tm
+(12. If one PDF fails, the scheduler logs the full traceback, emails an alert if enabled, and) Tj
+/F1 10 Tf
+1 0 0 1 54 146 Tm
+(continues to the next PDF.) Tj
+/F1 10 Tf
+1 0 0 1 54 133 Tm
+(13. If the whole run fails outside a single PDF, main.py logs a fatal error and sends a) Tj
+/F1 10 Tf
+1 0 0 1 54 120 Tm
+(fatal scheduler failure email.) Tj
+/F1 10 Tf
+1 0 0 1 54 107 Tm
+() Tj
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 8 0 R >>
+endobj
+8 0 obj
+<< /Length 3964 >>
+stream
+BT
+/F2 14 Tf
+1 0 0 1 54 734 Tm
+(Dropbox Layout) Tj
+/F1 10 Tf
+1 0 0 1 54 721 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 715 Tm
+(The app is configured for a Dropbox App Folder style app. Inside) Tj
+/F1 10 Tf
+1 0 0 1 54 702 Tm
+(Dropbox/Apps/TrinityScheduler, create:) Tj
+/F1 10 Tf
+1 0 0 1 54 689 Tm
+(- incoming_pdfs: staff drop new PDFs here.) Tj
+/F1 10 Tf
+1 0 0 1 54 676 Tm
+(- processed_pdfs: successfully processed PDFs are moved here.) Tj
+/F1 10 Tf
+1 0 0 1 54 663 Tm
+(- schedules: generated or updated schedule DOCX files are uploaded here.) Tj
+/F1 10 Tf
+1 0 0 1 54 650 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 637 Tm
+(The config paths are relative to the app folder: /incoming_pdfs, /processed_pdfs, and) Tj
+/F1 10 Tf
+1 0 0 1 54 624 Tm
+(/schedules.) Tj
+/F1 10 Tf
+1 0 0 1 54 611 Tm
+() Tj
+/F2 14 Tf
+1 0 0 1 54 599 Tm
+(Environment Variables) Tj
+/F1 10 Tf
+1 0 0 1 54 586 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 580 Tm
+(Required Dropbox values in .env:) Tj
+/F1 10 Tf
+1 0 0 1 54 567 Tm
+(DROPBOX_APP_KEY=<Dropbox app key>) Tj
+/F1 10 Tf
+1 0 0 1 54 554 Tm
+(DROPBOX_APP_SECRET=<Dropbox app secret>) Tj
+/F1 10 Tf
+1 0 0 1 54 541 Tm
+(DROPBOX_REFRESH_TOKEN=<offline refresh token from get_refresh_token.py>) Tj
+/F1 10 Tf
+1 0 0 1 54 528 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 515 Tm
+(Required Gmail alert values when email_notifications_enabled is true:) Tj
+/F1 10 Tf
+1 0 0 1 54 502 Tm
+(SMTP_HOST=smtp.gmail.com) Tj
+/F1 10 Tf
+1 0 0 1 54 489 Tm
+(SMTP_PORT=587) Tj
+/F1 10 Tf
+1 0 0 1 54 476 Tm
+(SMTP_USE_TLS=true) Tj
+/F1 10 Tf
+1 0 0 1 54 463 Tm
+(SMTP_USERNAME=<sending Gmail address>) Tj
+/F1 10 Tf
+1 0 0 1 54 450 Tm
+(SMTP_PASSWORD=<Google app password, not the normal Gmail password>) Tj
+/F1 10 Tf
+1 0 0 1 54 437 Tm
+(SMTP_FROM_EMAIL=<same sending Gmail address>) Tj
+/F1 10 Tf
+1 0 0 1 54 424 Tm
+(ALERT_TO_EMAIL=<alert recipient email address>) Tj
+/F1 10 Tf
+1 0 0 1 54 411 Tm
+() Tj
+/F2 14 Tf
+1 0 0 1 54 399 Tm
+(Configuration File) Tj
+/F1 10 Tf
+1 0 0 1 54 386 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 380 Tm
+(config/settings.json controls local folders, Dropbox folders, template paths, batch size,) Tj
+/F1 10 Tf
+1 0 0 1 54 367 Tm
+(adult cutoff age, and health check behavior.) Tj
+/F1 10 Tf
+1 0 0 1 54 354 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 341 Tm
+(Current important values:) Tj
+/F1 10 Tf
+1 0 0 1 54 328 Tm
+(- base_folder: data) Tj
+/F1 10 Tf
+1 0 0 1 54 315 Tm
+(- dropbox_input_folder: /incoming_pdfs) Tj
+/F1 10 Tf
+1 0 0 1 54 302 Tm
+(- dropbox_processed_pdf_folder: /processed_pdfs) Tj
+/F1 10 Tf
+1 0 0 1 54 289 Tm
+(- dropbox_schedule_folder: /schedules) Tj
+/F1 10 Tf
+1 0 0 1 54 276 Tm
+(- adult_age_cutoff: 18) Tj
+/F1 10 Tf
+1 0 0 1 54 263 Tm
+(- max_files_per_run: 200) Tj
+/F1 10 Tf
+1 0 0 1 54 250 Tm
+(- adult_template_path: templates/adult_report_template.docx) Tj
+/F1 10 Tf
+1 0 0 1 54 237 Tm
+(- child_template_path: templates/child_report_template.docx) Tj
+/F1 10 Tf
+1 0 0 1 54 224 Tm
+(- generated_docs_folder: /Users/anand/Desktop/reports) Tj
+/F1 10 Tf
+1 0 0 1 54 211 Tm
+(- health_check.log_folder: logs) Tj
+/F1 10 Tf
+1 0 0 1 54 198 Tm
+(- health_check.email_notifications_enabled: true) Tj
+/F1 10 Tf
+1 0 0 1 54 185 Tm
+() Tj
+/F2 14 Tf
+1 0 0 1 54 173 Tm
+(File Map) Tj
+/F1 10 Tf
+1 0 0 1 54 160 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 154 Tm
+(main.py: Main orchestrator. Loads config, creates/removes scheduler.lock, runs health) Tj
+/F1 10 Tf
+1 0 0 1 54 141 Tm
+(checks, loops through Dropbox PDFs, calls extraction/template/schedule/upload/move steps,) Tj
+/F1 10 Tf
+1 0 0 1 54 128 Tm
+(and handles error notifications.) Tj
+/F1 10 Tf
+1 0 0 1 54 115 Tm
+(run_scheduler.sh: Shell wrapper for background or manual execution. Activates venv and runs) Tj
+/F1 10 Tf
+1 0 0 1 54 102 Tm
+(main.py while appending stdout/stderr to logs.) Tj
+/F1 10 Tf
+1 0 0 1 54 89 Tm
+(config/settings.json: Runtime configuration for Dropbox folders, local folders, templates,) Tj
+/F1 10 Tf
+1 0 0 1 54 76 Tm
+(max files per run, adult age cutoff, and health monitoring.) Tj
+/F1 10 Tf
+1 0 0 1 54 63 Tm
+(.env: Secret local configuration. Holds Dropbox credentials and Gmail SMTP alert) Tj
+ET
+endstream
+endobj
+9 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 10 0 R >>
+endobj
+10 0 obj
+<< /Length 4131 >>
+stream
+BT
+/F1 10 Tf
+1 0 0 1 54 734 Tm
+(credentials. This file should not be zipped or committed.) Tj
+/F1 10 Tf
+1 0 0 1 54 721 Tm
+(.env.example: Non-secret template showing which environment variables are expected.) Tj
+/F1 10 Tf
+1 0 0 1 54 708 Tm
+(requirements.txt: Python dependencies: python-dotenv, dropbox, pdfplumber, python-docx, and) Tj
+/F1 10 Tf
+1 0 0 1 54 695 Tm
+(python-dateutil. python-docx is duplicated and can be cleaned later.) Tj
+/F1 10 Tf
+1 0 0 1 54 682 Tm
+(get_refresh_token.py: One-time helper that opens a Dropbox authorization flow and prints) Tj
+/F1 10 Tf
+1 0 0 1 54 669 Tm
+(DROPBOX_REFRESH_TOKEN for .env.) Tj
+/F1 10 Tf
+1 0 0 1 54 656 Tm
+(apis/dropbox_api.py: Dropbox wrapper functions for auth, listing PDFs, downloading files,) Tj
+/F1 10 Tf
+1 0 0 1 54 643 Tm
+(uploading schedules, checking for existing schedules, and moving processed PDFs.) Tj
+/F1 10 Tf
+1 0 0 1 54 630 Tm
+(app/config_loader.py: Reads config/settings.json.) Tj
+/F1 10 Tf
+1 0 0 1 54 617 Tm
+(app/pdf_extractor.py: Uses pdfplumber and regexes to parse authorization PDFs and return a) Tj
+/F1 10 Tf
+1 0 0 1 54 604 Tm
+(structured dictionary used by the rest of the app.) Tj
+/F1 10 Tf
+1 0 0 1 54 591 Tm
+(app/template_filler.py: Opens adult or child Word report templates, replaces placeholders in) Tj
+/F1 10 Tf
+1 0 0 1 54 578 Tm
+(paragraphs, tables, headers, and footers, formats DOB/age/date fields, and writes the) Tj
+/F1 10 Tf
+1 0 0 1 54 565 Tm
+(generated report DOCX.) Tj
+/F1 10 Tf
+1 0 0 1 54 552 Tm
+(app/schedule_generator.py: Creates or updates the same-day schedule DOCX. It sets landscape) Tj
+/F1 10 Tf
+1 0 0 1 54 539 Tm
+(layout, formats the table, avoids duplicate case IDs, sorts rows by date/time, and includes) Tj
+/F1 10 Tf
+1 0 0 1 54 526 Tm
+(a blank Comments column.) Tj
+/F1 10 Tf
+1 0 0 1 54 513 Tm
+(app/health_monitor.py: Sets up rotating logs, performs startup checks, builds traceback) Tj
+/F1 10 Tf
+1 0 0 1 54 500 Tm
+(email bodies, and sends Gmail SMTP alerts.) Tj
+/F1 10 Tf
+1 0 0 1 54 487 Tm
+(app/state_manager.py: Legacy helper for tracking processed Dropbox file IDs. It is not) Tj
+/F1 10 Tf
+1 0 0 1 54 474 Tm
+(currently used by main.py.) Tj
+/F1 10 Tf
+1 0 0 1 54 461 Tm
+(app/file_utils.py: Empty placeholder file; not used by the current workflow.) Tj
+/F1 10 Tf
+1 0 0 1 54 448 Tm
+() Tj
+/F2 14 Tf
+1 0 0 1 54 436 Tm
+(Word Template Placeholders) Tj
+/F1 10 Tf
+1 0 0 1 54 423 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 417 Tm
+(The report templates should contain these placeholders where needed:) Tj
+/F1 10 Tf
+1 0 0 1 54 404 Tm
+({{FULL_NAME}}) Tj
+/F1 10 Tf
+1 0 0 1 54 391 Tm
+({{FIRST_NAME}}) Tj
+/F1 10 Tf
+1 0 0 1 54 378 Tm
+({{LAST_NAME}}) Tj
+/F1 10 Tf
+1 0 0 1 54 365 Tm
+({{CASE_NUMBER}}) Tj
+/F1 10 Tf
+1 0 0 1 54 352 Tm
+({{DOB}}) Tj
+/F1 10 Tf
+1 0 0 1 54 339 Tm
+({{DATE_OF_EXAMINATION}}) Tj
+/F1 10 Tf
+1 0 0 1 54 326 Tm
+({{REFERRED_BY}}) Tj
+/F1 10 Tf
+1 0 0 1 54 313 Tm
+({{ALLEGATIONS}}) Tj
+/F1 10 Tf
+1 0 0 1 54 300 Tm
+({{EXAMINER}}) Tj
+/F1 10 Tf
+1 0 0 1 54 287 Tm
+({{DOCTOR_FULL_NAME}}) Tj
+/F1 10 Tf
+1 0 0 1 54 274 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 261 Tm
+(The code preserves template formatting by replacing text inside existing Word runs. EXAMINER) Tj
+/F1 10 Tf
+1 0 0 1 54 248 Tm
+(and DOCTOR_FULL_NAME are forced red when replaced.) Tj
+/F1 10 Tf
+1 0 0 1 54 235 Tm
+() Tj
+/F2 14 Tf
+1 0 0 1 54 223 Tm
+(Schedule DOCX Details) Tj
+/F1 10 Tf
+1 0 0 1 54 210 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 204 Tm
+(Schedule file name format: Schedule_<Month_Day_Year>.docx, for example) Tj
+/F1 10 Tf
+1 0 0 1 54 191 Tm
+(Schedule_May_10_2026.docx.) Tj
+/F1 10 Tf
+1 0 0 1 54 178 Tm
+(Schedule columns: Case ID, Patient / Doctor / Phone, DOB, Adult, Child, Date & Time,) Tj
+/F1 10 Tf
+1 0 0 1 54 165 Tm
+(Services Requested, Allegations, Comments.) Tj
+/F1 10 Tf
+1 0 0 1 54 152 Tm
+(The Comments column is intentionally blank for every new row.) Tj
+/F1 10 Tf
+1 0 0 1 54 139 Tm
+(If an older 8-column schedule is downloaded, schedule_generator.py upgrades it to the) Tj
+/F1 10 Tf
+1 0 0 1 54 126 Tm
+(current 9-column format before saving.) Tj
+/F1 10 Tf
+1 0 0 1 54 113 Tm
+(Rows are sorted using the Date & Time column. Unknown or unparsable dates sort last.) Tj
+/F1 10 Tf
+1 0 0 1 54 100 Tm
+() Tj
+ET
+endstream
+endobj
+11 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 12 0 R >>
+endobj
+12 0 obj
+<< /Length 3744 >>
+stream
+BT
+/F2 14 Tf
+1 0 0 1 54 734 Tm
+(Logging and Alerts) Tj
+/F1 10 Tf
+1 0 0 1 54 721 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 715 Tm
+(Normal activity is written to logs/scheduler.log.) Tj
+/F1 10 Tf
+1 0 0 1 54 702 Tm
+(Errors and tracebacks are written to logs/scheduler_error.log.) Tj
+/F1 10 Tf
+1 0 0 1 54 689 Tm
+(Log files rotate at about 2 MB, keeping 5 backups.) Tj
+/F1 10 Tf
+1 0 0 1 54 676 Tm
+(When a single PDF fails, the app sends an email with the PDF name, timestamp, host, working) Tj
+/F1 10 Tf
+1 0 0 1 54 663 Tm
+(directory, and traceback, then continues processing other PDFs.) Tj
+/F1 10 Tf
+1 0 0 1 54 650 Tm
+(When a fatal startup or scheduler-level failure occurs, the app sends a fatal scheduler) Tj
+/F1 10 Tf
+1 0 0 1 54 637 Tm
+(failure email and exits with an error.) Tj
+/F1 10 Tf
+1 0 0 1 54 624 Tm
+(A successful test was performed with a deliberately broken PDF; the system emailed a) Tj
+/F1 10 Tf
+1 0 0 1 54 611 Tm
+(PdfminerException traceback as expected.) Tj
+/F1 10 Tf
+1 0 0 1 54 598 Tm
+() Tj
+/F2 14 Tf
+1 0 0 1 54 586 Tm
+(Manual Test Checklist) Tj
+/F1 10 Tf
+1 0 0 1 54 573 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 567 Tm
+(1. Activate the environment: source venv/bin/activate) Tj
+/F1 10 Tf
+1 0 0 1 54 554 Tm
+(2. Run syntax check: python -m py_compile main.py app/*.py apis/*.py get_refresh_token.py) Tj
+/F1 10 Tf
+1 0 0 1 54 541 Tm
+(3. Test Gmail SMTP using app.health_monitor.send_email.) Tj
+/F1 10 Tf
+1 0 0 1 54 528 Tm
+(4. Put a valid test PDF in Dropbox/Apps/TrinityScheduler/incoming_pdfs.) Tj
+/F1 10 Tf
+1 0 0 1 54 515 Tm
+(5. Run python main.py.) Tj
+/F1 10 Tf
+1 0 0 1 54 502 Tm
+(6. Confirm a generated report appears in generated_docs_folder.) Tj
+/F1 10 Tf
+1 0 0 1 54 489 Tm
+(7. Confirm a schedule appears or updates in Dropbox /schedules.) Tj
+/F1 10 Tf
+1 0 0 1 54 476 Tm
+(8. Confirm the source PDF moves to Dropbox /processed_pdfs.) Tj
+/F1 10 Tf
+1 0 0 1 54 463 Tm
+(9. Test error alerts by putting a fake .pdf file in /incoming_pdfs and running python) Tj
+/F1 10 Tf
+1 0 0 1 54 450 Tm
+(main.py.) Tj
+/F1 10 Tf
+1 0 0 1 54 437 Tm
+(10. Remove the fake PDF after testing so alerts do not repeat.) Tj
+/F1 10 Tf
+1 0 0 1 54 424 Tm
+() Tj
+/F2 14 Tf
+1 0 0 1 54 412 Tm
+(Background LaunchAgent Notes) Tj
+/F1 10 Tf
+1 0 0 1 54 399 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 393 Tm
+(The setup document LaunchAgent plist is structurally correct for running the scheduler on a) Tj
+/F1 10 Tf
+1 0 0 1 54 380 Tm
+(Mac every 300 seconds.) Tj
+/F1 10 Tf
+1 0 0 1 54 367 Tm
+(The ProgramArguments path and WorkingDirectory must match the actual username and project) Tj
+/F1 10 Tf
+1 0 0 1 54 354 Tm
+(path.) Tj
+/F1 10 Tf
+1 0 0 1 54 341 Tm
+(After changing the plist, unload and reload it with launchctl.) Tj
+/F1 10 Tf
+1 0 0 1 54 328 Tm
+(Use launchctl list | grep com.trinity.dropbox.scheduler to confirm it is loaded.) Tj
+/F1 10 Tf
+1 0 0 1 54 315 Tm
+(Use tail -f logs/scheduler.log and tail -f logs/scheduler_error.log to watch activity.) Tj
+/F1 10 Tf
+1 0 0 1 54 302 Tm
+() Tj
+/F2 14 Tf
+1 0 0 1 54 290 Tm
+(Known Cleanup Items) Tj
+/F1 10 Tf
+1 0 0 1 54 277 Tm
+() Tj
+/F1 10 Tf
+1 0 0 1 54 271 Tm
+(These are not blockers:) Tj
+/F1 10 Tf
+1 0 0 1 54 258 Tm
+(- Remove the duplicate python-docx line from requirements.txt.) Tj
+/F1 10 Tf
+1 0 0 1 54 245 Tm
+(- Consider converting remaining print calls in helper modules to logger calls for cleaner) Tj
+/F1 10 Tf
+1 0 0 1 54 232 Tm
+(  logs.) Tj
+/F1 10 Tf
+1 0 0 1 54 219 Tm
+(- app/state_manager.py and app/file_utils.py can be removed later if no future workflow) Tj
+/F1 10 Tf
+1 0 0 1 54 206 Tm
+(  needs them.) Tj
+/F1 10 Tf
+1 0 0 1 54 193 Tm
+(- run_scheduler.sh appends to the same log files that Python now writes to. This is) Tj
+/F1 10 Tf
+1 0 0 1 54 180 Tm
+(  acceptable, but the shell wrapper could be simplified later.) Tj
+/F1 10 Tf
+1 0 0 1 54 167 Tm
+() Tj
+ET
+endstream
+endobj
+xref
+0 13
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000134 00000 n 
+0000000204 00000 n 
+0000000279 00000 n 
+0000000415 00000 n 
+0000004837 00000 n 
+0000004973 00000 n 
+0000008989 00000 n 
+0000009126 00000 n 
+0000013310 00000 n 
+0000013448 00000 n 
+trailer
+<< /Size 13 /Root 1 0 R >>
+startxref
+17245
+%%EOF

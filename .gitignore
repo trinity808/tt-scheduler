@@ -1,0 +1,38 @@
+# Secrets
+.env
+
+# Planning doc — living/in-progress, not tracked system state
+scope.pdf
+
+# Runtime lock file (created/removed by main.py on every run)
+scheduler.lock
+
+# Legacy dedup state file — state_manager.py is currently unused,
+# but never commit this if it starts getting created again
+processed_dropbox_files.txt
+
+# Runtime-generated output (local mirrors of schedule/report data)
+data/
+reports/
+logs/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Word lock files (created automatically while a .docx is open)
+~$*.docx
+
+# OS junk
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor
+.vscode/
+.idea/
+# Never re-add — this repo intentionally excludes these
+templates/
+testing pdfs/

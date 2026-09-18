@@ -1,0 +1,16 @@
+{
+  "base_folder": "data",
+  "dropbox_input_folder": "/incoming_pdfs",
+  "dropbox_processed_pdf_folder": "/processed_pdfs",
+  "dropbox_schedule_folder": "/schedules",
+  "adult_age_cutoff": 18,
+  "max_files_per_run": 200,
+  "adult_template_path": "templates/adult_report_template.docx",
+  "child_template_path": "templates/child_report_template.docx",
+  "generated_docs_folder": "reports",
+  "health_check": {
+    "log_folder": "logs",
+    "email_notifications_enabled": false,
+    "email_subject_prefix": "[Trinity Scheduler]"
+  }
+}
