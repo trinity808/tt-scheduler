@@ -36,3 +36,4 @@ Desktop.ini
 # Never re-add — this repo intentionally excludes these
 templates/
 testing pdfs/
+config/service_account.json
