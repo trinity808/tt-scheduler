@@ -4,3 +4,4 @@ pdfplumber
 python-docx
 python-dateutil
 python-docx
+gspread
