@@ -1,8 +1,5 @@
 {
   "base_folder": "data",
-"dropbox_input_folder": "/Apps/trinity-scheduler-test/incoming_pdfs",
-"dropbox_processed_pdf_folder": "/Apps/trinity-scheduler-test/processed_pdfs",
-"dropbox_schedule_folder": "/Apps/trinity-scheduler-test/schedules",
   "adult_age_cutoff": 18,
   "max_files_per_run": 200,
   "adult_template_path": "templates/adult_report_template.docx",
