@@ -2,7 +2,11 @@ import os
 import dropbox
 from dotenv import load_dotenv
 
+from app.health_monitor import get_logger
+
 load_dotenv()
+
+logger = get_logger()
 
 
 def get_dropbox_client():
@@ -75,7 +79,7 @@ def download_file(dropbox_path, local_path):
     with open(local_path, "wb") as f:
         f.write(response.content)
 
-    print(f"Downloaded from Dropbox: {dropbox_path}")
+    logger.info("Downloaded from Dropbox: %s", dropbox_path)
     return local_path
 
 
