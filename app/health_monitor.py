@@ -70,14 +70,21 @@ def run_startup_health_check(config):
 
     required_config_keys = [
         "base_folder",
-        "dropbox_input_folder",
-        "dropbox_processed_pdf_folder",
-        "dropbox_schedule_folder",
     ]
 
     for key in required_config_keys:
         if not config.get(key):
             problems.append(f"Missing config/settings.json value: {key}")
+
+    required_env_keys = [
+        "DROPBOX_INPUT_FOLDER",
+        "DROPBOX_PROCESSED_PDF_FOLDER",
+        "DROPBOX_SCHEDULE_FOLDER",
+    ]
+
+    for key in required_env_keys:
+        if not os.getenv(key):
+            problems.append(f"Missing .env value: {key}")
 
     for key in ("adult_template_path", "child_template_path"):
         template_path = config.get(key)

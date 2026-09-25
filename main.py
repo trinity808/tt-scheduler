@@ -45,9 +45,17 @@ def main(config):
     run_startup_health_check(config)
 
     base_folder = config["base_folder"]
-    input_folder = config["dropbox_input_folder"]
-    processed_pdf_folder = config["dropbox_processed_pdf_folder"]
-    schedule_folder = config["dropbox_schedule_folder"]
+    input_folder = os.getenv("DROPBOX_INPUT_FOLDER")
+    processed_pdf_folder = os.getenv("DROPBOX_PROCESSED_PDF_FOLDER")
+    schedule_folder = os.getenv("DROPBOX_SCHEDULE_FOLDER")
+
+    if not all([input_folder, processed_pdf_folder, schedule_folder]):
+        raise ValueError(
+            "DROPBOX_INPUT_FOLDER, DROPBOX_PROCESSED_PDF_FOLDER, and "
+            "DROPBOX_SCHEDULE_FOLDER must all be set in .env — these are "
+            "personal to each sandbox's Dropbox access type/app name, "
+            "not shared config."
+        )
 
     adult_age_cutoff = config.get("adult_age_cutoff", 18)
     max_files_per_run = config.get("max_files_per_run", 200)
