@@ -321,6 +321,11 @@ def extract_services(page2_text):
     return services
 
 def extract_examiner_initials(text):
+    # NOTE: This is the SSA's own disability claims examiner (from the
+    # government's paperwork), NOT the TT psychometrist who conducts
+    # the exam. The psychometrist has no source in the incoming PDF —
+    # that's a separate, manually-entered field (see the Ongoing
+    # sheet's "Psychometrist" column).
     """
     Extracts examiner initials from text like:
     Examiner: Shanelle Wolf LEX: WAS8 Site Code: S03 LUN: U51
