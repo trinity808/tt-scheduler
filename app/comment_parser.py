@@ -27,7 +27,13 @@ Keys are matched case-insensitively (Provider / provider / PROVIDER
 all work), since consistent capitalization isn't something to rely
 on. Lines that don't match a known key are collected as
 "unrecognized" rather than silently dropped, so a typo surfaces
-instead of quietly disappearing.
+instead of quietly disappearing. The same applies to a key left
+blank (e.g. "Provider:" with nothing after it — flagged, and the
+field stays untouched rather than overwriting an existing value with
+an empty one) and to a key repeated more than once in the same
+comment (flagged, though the later value still wins — Price/Provider/
+Psychometrist only; +Service is exempt since multiple lines there are
+the normal way to add more than one service).
 """
 
 import re
@@ -44,15 +50,23 @@ class ParsedComment:
 
 
 def _handle_provider(value, result):
-    result.provider = value.strip()
+    value = value.strip()
+    if value:
+        result.provider = value
+    else:
+        result.unrecognized_lines.append("Provider: (left blank)")
 
 
 def _handle_psychometrist(value, result):
-    result.psychometrist = value.strip()
+    value = value.strip()
+    if value:
+        result.psychometrist = value
+    else:
+        result.unrecognized_lines.append("Psychometrist: (left blank)")
 
 
 def _handle_add_service(value, result):
-    match = re.match(r"^(.+?)\s*-\s*(.+?)\s*-\s*\$(\d+(?:\.\d{2})?)$", value.strip())
+    match = re.match(r"^(.+?)\s*-\s*(.+?)\s*-\s*\$?(\d+(?:\.\d{2})?)$", value.strip())
     if match:
         code, description, amount = match.groups()
         result.added_services.append(
@@ -82,9 +96,16 @@ FIELD_HANDLERS = {
     "price": _handle_price,
 }
 
+# Keys where a second occurrence in the same comment is unusual and
+# worth flagging for visibility, rather than silently letting the
+# later one win. +service is deliberately excluded — multiple lines
+# are the normal, expected way to add more than one service.
+DUPLICATE_CHECKED_KEYS = {"provider", "psychometrist", "price"}
+
 
 def parse_comment(comment_text):
     result = ParsedComment()
+    seen_keys = set()
 
     if not comment_text:
         return result
@@ -99,9 +120,15 @@ def parse_comment(comment_text):
             continue
 
         key, value = line.split(":", 1)
-        handler = FIELD_HANDLERS.get(key.strip().lower())
+        normalized_key = key.strip().lower()
+        handler = FIELD_HANDLERS.get(normalized_key)
 
         if handler:
+            if normalized_key in DUPLICATE_CHECKED_KEYS and normalized_key in seen_keys:
+                result.unrecognized_lines.append(
+                    f"{line}  (duplicate — {key.strip()} was already specified earlier; this later value is being used)"
+                )
+            seen_keys.add(normalized_key)
             handler(value, result)
         else:
             result.unrecognized_lines.append(line)
@@ -113,7 +140,8 @@ if __name__ == "__main__":
     sample = """Provider: Dr. Shelton
 Psychometrist: J. Smith
 +Service: 96130 - Autism testing - $92
-Price: $576"""
+Price: $576
+Price: $24"""
 
     print("--- Sample input ---")
     print(sample)
