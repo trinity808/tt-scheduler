@@ -89,10 +89,17 @@ def _handle_price(value, result):
 # Each key maps to a handler. Adding/renaming/dropping a field after
 # team review means editing this dict and its handler function —
 # parse_comment() itself never needs to change.
+#
+# Service has several accepted spellings, since dropping the "+" or
+# pluralizing it is an easy slip at end of day. All of them route to
+# the same handler, so they behave identically.
 FIELD_HANDLERS = {
     "provider": _handle_provider,
     "psychometrist": _handle_psychometrist,
     "+service": _handle_add_service,
+    "+services": _handle_add_service,
+    "service": _handle_add_service,
+    "services": _handle_add_service,
     "price": _handle_price,
 }
 
@@ -101,6 +108,18 @@ FIELD_HANDLERS = {
 # later one win. +service is deliberately excluded — multiple lines
 # are the normal, expected way to add more than one service.
 DUPLICATE_CHECKED_KEYS = {"provider", "psychometrist", "price"}
+
+
+def _contains_embedded_key(value):
+    """
+    True if a value contains another recognized key followed by a
+    colon, which means two fields were crammed onto one line (e.g.
+    "Provider: Dr. Doe +Service: 96130 ..."). Treating that whole
+    string as the first field's value would silently write the wrong
+    data, so the line gets flagged instead.
+    """
+    lowered = value.lower()
+    return any(f"{key}:" in lowered for key in FIELD_HANDLERS)
 
 
 def parse_comment(comment_text):
@@ -124,6 +143,11 @@ def parse_comment(comment_text):
         handler = FIELD_HANDLERS.get(normalized_key)
 
         if handler:
+            if _contains_embedded_key(value):
+                result.unrecognized_lines.append(
+                    f"{line}  (looks like more than one field on one line, put each on its own line)"
+                )
+                continue
             if normalized_key in DUPLICATE_CHECKED_KEYS and normalized_key in seen_keys:
                 result.unrecognized_lines.append(
                     f"{line}  (duplicate — {key.strip()} was already specified earlier; this later value is being used)"
@@ -138,10 +162,9 @@ def parse_comment(comment_text):
 
 if __name__ == "__main__":
     sample = """Provider: Dr. Shelton
-Psychometrist: J. Smith
-+Service: 96130 - Autism testing - $92
-Price: $576
-Price: $24"""
+Service: 96130 - Autism testing - $92
++Services: 96101 - WISC-V - $175
+servics: 90791 - Psychiatric Exam - $120"""
 
     print("--- Sample input ---")
     print(sample)
