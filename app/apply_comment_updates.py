@@ -84,6 +84,10 @@ def apply_comment_updates(worksheet):
     results = []
 
     for row_number, row in enumerate(all_values[1:], start=2):
+        case_id = row[case_id_idx].strip()
+        if not case_id:
+            continue
+        
         comment_text = row[comments_idx]
         if not comment_text.strip():
             continue
