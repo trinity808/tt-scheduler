@@ -27,13 +27,14 @@ Keys are matched case-insensitively (Provider / provider / PROVIDER
 all work), since consistent capitalization isn't something to rely
 on. Lines that don't match a known key are collected as
 "unrecognized" rather than silently dropped, so a typo surfaces
-instead of quietly disappearing. The same applies to a key left
-blank (e.g. "Provider:" with nothing after it — flagged, and the
-field stays untouched rather than overwriting an existing value with
-an empty one) and to a key repeated more than once in the same
-comment (flagged, though the later value still wins — Price/Provider/
-Psychometrist only; +Service is exempt since multiple lines there are
-the normal way to add more than one service).
+instead of quietly disappearing. A key left blank (e.g. "Provider:"
+with nothing after it) is treated as "not provided": skipped
+silently, with the field left untouched. This supports OA pasting a
+blank template and filling in only what applies. It doesn't count
+toward duplicate detection either. A key repeated more than once in
+the same comment is flagged, though the later value still wins
+(Price/Provider/Psychometrist only; +Service is exempt since multiple
+lines there are the normal way to add more than one service).
 """
 
 import re
@@ -53,16 +54,12 @@ def _handle_provider(value, result):
     value = value.strip()
     if value:
         result.provider = value
-    else:
-        result.unrecognized_lines.append("Provider: (left blank)")
 
 
 def _handle_psychometrist(value, result):
     value = value.strip()
     if value:
         result.psychometrist = value
-    else:
-        result.unrecognized_lines.append("Psychometrist: (left blank)")
 
 
 def _handle_add_service(value, result):
@@ -143,6 +140,8 @@ def parse_comment(comment_text):
         handler = FIELD_HANDLERS.get(normalized_key)
 
         if handler:
+            if not value.strip():
+                continue
             if _contains_embedded_key(value):
                 result.unrecognized_lines.append(
                     f"{line}  (looks like more than one field on one line, put each on its own line)"
