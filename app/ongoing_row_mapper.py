@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from gspread.utils import rowcol_to_a1
 
 from app.pdf_extractor import extract_schedule_data
-from app.sheet_client import find_case_row, update_case_field
+from app.sheet_client import update_case_field
 
 
 # Fields OA enters manually — never overwritten by a re-extraction,
@@ -98,41 +98,75 @@ def flag_duplicate_row(worksheet, row_number, num_columns):
 
 def add_or_update_case(worksheet, extracted_data):
     """
-    Adds extracted_data as a new row in worksheet if its Case ID
-    isn't already present, or updates the extraction-derived fields
-    of the existing row in place if it is, flagging the row so the
-    duplicate is visible rather than silent. Manual-entry fields are
-    left untouched either way.
+    Adds extracted_data as a new row if its Case ID isn't already in
+    the tab, or updates the extraction-derived fields of the existing
+    row in place if it is, flagging the row so the duplicate is
+    visible. Manual-entry fields are left untouched either way.
 
-    Note: an update makes one API call per extraction-derived field
-    (via update_case_field), not a single batched call — simple and
-    consistent with the rest of this codebase, but worth revisiting
-    if this ever needs to run at higher volume, since it's more
-    calls than strictly necessary for one row.
+    New cases go into the first row after the last row that has a
+    Case ID, not appended after the last non-empty row. That way a
+    template pre-filled in the Comments column of empty rows doesn't
+    push new cases further down, and the template is kept on the row
+    the case lands in. A gap left by a hand-cleared row stays a gap
+    rather than pulling new cases out of order.
 
-    Returns a tuple: ("added" | "updated", row_number_or_None).
+    Returns a tuple: ("added" | "updated", row_number).
     """
-    case_id = extracted_data.get("case_id", "")
-    headers = worksheet.row_values(1)
+    case_id = str(extracted_data.get("case_id", "")).strip()
 
-    existing = find_case_row(worksheet, case_id)
+    all_values = worksheet.get_all_values()
+    headers = all_values[0]
+    case_id_idx = headers.index("Case ID")
 
-    if existing is None:
-        row = build_ongoing_row(extracted_data, headers)
-        worksheet.append_row(row)
-        return "added", None
+    existing_row_number = None
+    last_case_row = 1  # header row, if no cases exist yet
 
-    row_number, _ = existing
-    row_values = build_ongoing_row(extracted_data, headers)
-
-    for header, value in zip(headers, row_values):
-        if header in MANUAL_ENTRY_FIELDS:
+    for row_number, row in enumerate(all_values[1:], start=2):
+        row_case_id = row[case_id_idx].strip() if case_id_idx < len(row) else ""
+        if not row_case_id:
             continue
-        update_case_field(worksheet, row_number, header, value)
+        last_case_row = row_number
+        if row_case_id == case_id:
+            existing_row_number = row_number
 
-    flag_duplicate_row(worksheet, row_number, len(headers))
+    new_values = build_ongoing_row(extracted_data, headers)
 
-    return "updated", row_number
+    if existing_row_number is not None:
+        for header, value in zip(headers, new_values):
+            if header in MANUAL_ENTRY_FIELDS:
+                continue
+            update_case_field(worksheet, existing_row_number, header, value)
+        flag_duplicate_row(worksheet, existing_row_number, len(headers))
+        return "updated", existing_row_number
+
+    target_row = last_case_row + 1
+
+    # Always write to an explicit range. append_row() relies on Sheets
+    # detecting "the table", which gets confused by gaps and can shift
+    # the whole row into the wrong columns.
+    if target_row > worksheet.row_count:
+        worksheet.add_rows(target_row - worksheet.row_count)
+
+    # The target row may already hold something (e.g. a pre-filled
+    # template). Keep any existing manual-entry values; fill the rest.
+    if target_row <= len(all_values):
+        existing = all_values[target_row - 1]
+    else:
+        existing = []
+    existing = existing + [""] * (len(headers) - len(existing))
+
+    merged = []
+    for header, new_value, old_value in zip(headers, new_values, existing):
+        if header in MANUAL_ENTRY_FIELDS and old_value.strip():
+            merged.append(old_value)
+        else:
+            merged.append(new_value)
+
+    start = rowcol_to_a1(target_row, 1)
+    end = rowcol_to_a1(target_row, len(headers))
+    worksheet.update(range_name=f"{start}:{end}", values=[merged])
+
+    return "added", target_row
 
 
 if __name__ == "__main__":
@@ -155,7 +189,7 @@ if __name__ == "__main__":
     if confirm == "y":
         action, row_number = add_or_update_case(ongoing, extracted)
         if action == "added":
-            print("Added as a new row.")
+            print(f"Added at row {row_number}.")
         else:
             print(
                 f"Case already existed at row {row_number} — extraction-derived "
