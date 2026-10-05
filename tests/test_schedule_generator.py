@@ -1,13 +1,12 @@
 """
-Unit test for schedule_generator.py's sort_table_by_datetime().
+Tests for app/schedule_generator.py's sort_table_by_datetime(), the
+sort used by the legacy DOCX schedule that main.py still produces.
 
-Rows are added in deliberately WRONG chronological order (1 PM, then
-8 AM, then 10 AM). If sort_table_by_datetime() genuinely sorts, the
-output order should be 8 AM, 10 AM, 1 PM regardless of insertion
-order — a real sort, not a coincidence of append order.
+Each test builds a small table in memory and sorts it, so nothing is
+written to disk.
 
-Run from the project root as:
-    python -m tests.test_sort_logic
+Run from the project root:
+    python -m pytest tests/test_schedule_generator.py -v
 """
 
 from docx import Document
@@ -15,49 +14,76 @@ from docx import Document
 from app.schedule_generator import SCHEDULE_HEADERS, sort_table_by_datetime
 
 
-def build_test_table():
+DATE_TIME_COL = SCHEDULE_HEADERS.index("Date & Time")
+
+
+def make_table(rows):
+    """
+    Builds a schedule table with the real headers. Each row is given
+    as (case_id, date_time_text); other columns are left blank.
+    """
     doc = Document()
     table = doc.add_table(rows=1, cols=len(SCHEDULE_HEADERS))
-
     for i, header in enumerate(SCHEDULE_HEADERS):
         table.rows[0].cells[i].text = header
 
-    # Deliberately out of order — 1 PM first, then 8 AM, then 10 AM
-    test_rows = [
-        ["30003", "Row C - 1PM", "", "", "", "May 4, 2026\n 1:00 PM MST", "", "", ""],
-        ["30001", "Row A - 8AM", "", "", "", "May 4, 2026\n 8:00 AM MST", "", "", ""],
-        ["30002", "Row B - 10AM", "", "", "", "May 4, 2026\n 10:00 AM MST", "", "", ""],
-    ]
-
-    for row_data in test_rows:
-        row = table.add_row().cells
-        for i, value in enumerate(row_data):
-            row[i].text = value
+    for case_id, date_time in rows:
+        cells = table.add_row().cells
+        cells[0].text = case_id
+        cells[DATE_TIME_COL].text = date_time
 
     return table
 
 
-def main():
-    table = build_test_table()
+def case_ids(table):
+    return [row.cells[0].text for row in table.rows[1:]]
 
-    print("Order BEFORE sort:")
-    for row in table.rows[1:]:
-        print(f"  {row.cells[0].text} - {row.cells[1].text}")
 
+def test_rows_sorted_by_time_regardless_of_insertion_order():
+    # Inserted deliberately out of order: 1 PM, 8 AM, 10 AM.
+    table = make_table([
+        ("30003", "May 4, 2026\n 1:00 PM MST"),
+        ("30001", "May 4, 2026\n 8:00 AM MST"),
+        ("30002", "May 4, 2026\n 10:00 AM MST"),
+    ])
     sort_table_by_datetime(table)
-
-    print("\nOrder AFTER sort:")
-    for row in table.rows[1:]:
-        print(f"  {row.cells[0].text} - {row.cells[1].text}")
-
-    actual_order = [row.cells[0].text for row in table.rows[1:]]
-    expected_order = ["30001", "30002", "30003"]
-
-    if actual_order == expected_order:
-        print("\nPASS — rows correctly reordered by time, independent of insertion order.")
-    else:
-        print(f"\nFAIL — expected {expected_order}, got {actual_order}")
+    assert case_ids(table) == ["30001", "30002", "30003"]
 
 
-if __name__ == "__main__":
-    main()
+def test_header_row_stays_first():
+    table = make_table([
+        ("30002", "May 4, 2026\n 10:00 AM MST"),
+        ("30001", "May 4, 2026\n 8:00 AM MST"),
+    ])
+    sort_table_by_datetime(table)
+    assert table.rows[0].cells[0].text == SCHEDULE_HEADERS[0]
+
+
+def test_already_sorted_rows_stay_in_order():
+    table = make_table([
+        ("30001", "May 4, 2026\n 8:00 AM MST"),
+        ("30002", "May 4, 2026\n 10:00 AM MST"),
+    ])
+    sort_table_by_datetime(table)
+    assert case_ids(table) == ["30001", "30002"]
+
+
+def test_date_written_as_produced_by_the_pipeline_is_sorted():
+    # The pipeline writes dates like "May 4th", not "May 4".
+    table = make_table([
+        ("30002", "May 4th, 2026\n 10:00 AM MST"),
+        ("30001", "May 4th, 2026\n 08:00 AM MST"),
+    ])
+    sort_table_by_datetime(table)
+    assert case_ids(table) == ["30001", "30002"]
+
+
+def test_unparseable_date_sorts_last():
+    # Documents existing behavior: a date the parser can't read doesn't
+    # raise an error, it silently sorts to the bottom.
+    table = make_table([
+        ("30009", "not a date"),
+        ("30001", "May 4, 2026\n 8:00 AM MST"),
+    ])
+    sort_table_by_datetime(table)
+    assert case_ids(table) == ["30001", "30009"]
