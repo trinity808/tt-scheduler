@@ -81,6 +81,17 @@ def test_extraction_matches_known_values(pdf_name, case_id, patient, dob, adult,
     assert data["total"] == "484.00"
 
 
+def test_service_codes_extracted_whole():
+    # The code includes the test abbreviation, e.g. "96101-WISC-V",
+    # not just the five-digit billing code.
+    data = extract("Test1-may4_2026.pdf")
+    assert [s["code"] for s in data["services"]] == [
+        "96101-WISC-V",
+        "90791",
+        "96130-AUTISM",
+    ]
+
+
 # --- Report generation ----------------------------------------------
 
 
