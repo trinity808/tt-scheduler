@@ -139,6 +139,42 @@ def test_malformed_service_flagged(bad_value):
     assert_single_flag(parsed, "couldn't parse")
 
 
+@pytest.mark.parametrize(
+    "line, code, description",
+    [
+        ("96101-WISC-V - Wechsler Intelligence Scale for Children - Ages 6 to 16 years - $92",
+         "96101-WISC-V", "Wechsler Intelligence Scale for Children - Ages 6 to 16 years"),
+        ("96101-WIAT-III - Wechsler Individual Achievement Scale - Third Edition Ages 4 to 85 years - $150",
+         "96101-WIAT-III", "Wechsler Individual Achievement Scale - Third Edition Ages 4 to 85 years"),
+        ("96101-WJ-IV - Woodcock-Johnson Tests of Achievement IV Age - 2 to 80+ years - $150",
+         "96101-WJ-IV", "Woodcock-Johnson Tests of Achievement IV Age - 2 to 80+ years"),
+        ("90791 - Psychiatric Exam - $120",
+         "90791", "Psychiatric Exam"),
+        ("96130-AUTISM - Appropriate testing to evaluate Autism Spectrum Disorders - $92",
+         "96130-AUTISM", "Appropriate testing to evaluate Autism Spectrum Disorders"),
+    ],
+)
+def test_real_service_lines_parse_with_full_code(line, code, description):
+    parsed = parse_comment(f"+Service: {line}")
+    assert parsed.added_services[0]["code"] == code
+    assert parsed.added_services[0]["description"] == description
+    assert_clean(parsed)
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        "9613-AUTISM - Autism testing - $92",   # four-digit code
+        "AUTISM - Autism testing - $92",        # no numeric code
+        "96130-AUTISM- Autism testing - $92",   # no space before the separator
+    ],
+)
+def test_bad_service_code_flagged(bad_value):
+    parsed = parse_comment(f"+Service: {bad_value}")
+    assert parsed.added_services == []
+    assert_single_flag(parsed, "with a code like 96130-AUTISM")
+    
+
 # --- Price ---------------------------------------------------------
 
 
