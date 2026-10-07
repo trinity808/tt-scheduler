@@ -15,13 +15,13 @@ Run from the project root:
     python -m pytest tests/test_ongoing_row_mapper.py -v
 """
 
-from gspread.utils import a1_to_rowcol
 
 from app.ongoing_row_mapper import (
     DUPLICATE_HIGHLIGHT_COLOR,
     add_or_update_case,
     build_ongoing_row,
 )
+from tests.fakes import FakeWorksheet
 
 
 HEADERS = [
@@ -30,71 +30,6 @@ HEADERS = [
     "Psychometrist", "Provider", "Price", "Comments",
 ]
 TEMPLATE = "Provider:\nPsychometrist:\n+Service:\nPrice:"
-
-
-class FakeWorksheet:
-    """
-    Stands in for a gspread Worksheet. Imitates two real behaviors
-    placement depends on: get_all_values() stops at the last row with
-    content, and writing beyond row_count is an error.
-    """
-
-    def __init__(self, rows, row_count=1000):
-        self.rows = [list(row) for row in rows]  # row 1 = headers
-        self.row_count = row_count
-        self.notes = {}
-        self.formats = {}
-        self.rows_added = 0
-
-    # --- reads ---
-
-    def get_all_values(self):
-        rows = [list(row) for row in self.rows]
-        while rows and not any(cell.strip() for cell in rows[-1]):
-            rows.pop()
-        width = max(len(row) for row in rows)
-        return [row + [""] * (width - len(row)) for row in rows]
-
-    def row_values(self, row_number):
-        return list(self.rows[row_number - 1])
-
-    # --- writes ---
-
-    def _set(self, row, col, value):
-        if row > self.row_count:
-            raise IndexError(f"row {row} is beyond the sheet's {self.row_count} rows")
-        while len(self.rows) < row:
-            self.rows.append([""] * len(HEADERS))
-        target = self.rows[row - 1]
-        while len(target) < col:
-            target.append("")
-        target[col - 1] = value
-
-    def update(self, range_name, values):
-        start_row, start_col = a1_to_rowcol(range_name.split(":")[0])
-        for r_offset, row_values in enumerate(values):
-            for c_offset, value in enumerate(row_values):
-                self._set(start_row + r_offset, start_col + c_offset, value)
-
-    def update_cell(self, row, col, value):
-        self._set(row, col, value)
-
-    def add_rows(self, n):
-        self.row_count += n
-        self.rows_added += n
-
-    def format(self, cell_range, fmt):
-        self.formats[cell_range] = fmt
-
-    def update_note(self, cell, text):
-        self.notes[cell] = text
-
-    # --- test helper ---
-
-    def value(self, row_number, header):
-        row = self.rows[row_number - 1]
-        idx = HEADERS.index(header)
-        return row[idx] if idx < len(row) else ""
 
 
 def extracted(case_id, name="Test Patient", total="484.00"):

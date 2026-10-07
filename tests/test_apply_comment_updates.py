@@ -22,44 +22,7 @@ from app.apply_comment_updates import (
     COMMENT_ISSUE_COLOR,
     apply_comment_updates,
 )
-
-
-class FakeWorksheet:
-    """
-    Stands in for a gspread Worksheet, implementing only the methods
-    apply_comment_updates() and its helpers actually call.
-    """
-
-    def __init__(self, rows):
-        self.rows = [list(row) for row in rows]  # row 1 = headers
-        self.notes = {}     # cell (e.g. "D2") -> note text
-        self.formats = {}   # cell -> last format applied
-        self.writes = []    # every update_cell call, as (row, col, value)
-
-    def row_values(self, row_number):
-        return list(self.rows[row_number - 1])
-
-    def get_all_values(self):
-        # Return a copy, like the real API: the caller gets a snapshot,
-        # and later writes don't change what it already read.
-        return [list(row) for row in self.rows]
-
-    def update_cell(self, row, col, value):
-        self.writes.append((row, col, value))
-        self.rows[row - 1][col - 1] = value
-
-    def format(self, cell, fmt):
-        self.formats[cell] = fmt
-
-    def update_note(self, cell, text):
-        self.notes[cell] = text
-
-    def clear_note(self, cell):
-        self.notes.pop(cell, None)
-
-    def value(self, row_number, header):
-        """Test helper: read a cell by row number and header name."""
-        return self.rows[row_number - 1][self.rows[0].index(header)]
+from tests.fakes import FakeWorksheet
 
 
 # Comments is column D with these headers, so row 2's Comments cell
