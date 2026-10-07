@@ -47,7 +47,6 @@ was used, but something about it is worth knowing):
 import difflib
 import re
 from dataclasses import dataclass, field
-from app.service_format import SERVICE_CODE_PATTERN
 
 
 @dataclass
@@ -71,27 +70,17 @@ def _handle_psychometrist(value, result):
         result.psychometrist = value
 
 
-# code - description - amount, with spaces around both separating
-# hyphens. The description is free text and may contain hyphens of its
-# own (e.g. "Age - 2 to 80+ years"); only the code at the start and
-# the amount at the end are anchored.
-_SERVICE_LINE = re.compile(
-    r"^(" + SERVICE_CODE_PATTERN + r")\s+-\s+(.+?)\s+-\s+\$?(\d+(?:\.\d{2})?)$"
-)
-
-
 def _handle_add_service(value, result):
     value = value.strip()
-    match = _SERVICE_LINE.match(value)
+    match = re.match(r"^(.+?)\s*-\s*(.+?)\s*-\s*\$?(\d+(?:\.\d{2})?)$", value)
     if match:
         code, description, amount = match.groups()
         result.added_services.append(
-            {"code": code, "description": description.strip(), "amount": amount}
+            {"code": code.strip(), "description": description.strip(), "amount": amount}
         )
     else:
         result.unrecognized_lines.append(
-            f"+Service: {value}  (skipped: couldn't parse, expected "
-            "'code - description - $amount' with a code like 96130-AUTISM)"
+            f"+Service: {value}  (skipped: couldn't parse, expected 'code - description - $amount')"
         )
 
 
