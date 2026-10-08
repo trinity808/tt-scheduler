@@ -153,3 +153,19 @@ def move_file(from_path, to_path):
     except Exception as e:
         print(f"Failed to move Dropbox file: {e}")
         raise
+
+def debug_walk_2026():
+    dbx = get_dropbox_client()
+
+    root_path = "/2026"
+
+    print(f"\nLooking inside: {root_path}")
+
+    result = dbx.files_list_folder(root_path)
+
+    for entry in result.entries:
+        print(
+            entry.__class__.__name__,
+            entry.name,
+            entry.path_display
+        )
