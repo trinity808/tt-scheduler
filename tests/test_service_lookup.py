@@ -22,12 +22,12 @@ def table(*rows):
     return [HEADERS, *rows]
 
 
-# Copy of the Services tab as of this writing. Rows without a
-# five-digit code are tests from TT's website whose billing codes
-# aren't known yet.
+# Copy of the Services tab as of this writing. A frozen snapshot for
+# testing: editing the real tab never breaks these tests, but refresh
+# this copy now and then so the tests stay close to reality.
 REAL_TABLE = """\
 Code\tAliases\tName
-90791\tPsych, Psychiatric Exam\tPsychiatric Exam
+90791\tPsychiatric Exam\tPsychiatric Exam
 96101-WISC-V\tWISC\tWechsler Intelligence Scale for Children
 96101-WIAT-III\tWIAT\tWechsler Individual Achievement Scale - Third Edition
 96101-WAIS-IV\tWAIS\tWechsler Adult Intelligence Scale
@@ -43,10 +43,6 @@ Code\tAliases\tName
 99075-MTNL\t\tMedical Source Statement
 99358-PSYCH\t\tReview of Records (Psychological)
 96101-TONI-3 \t\tTest of Non Verbal Intelligence - Third Edition
-Beery VMI\t\tBeery-Buktenica Developmental Test of Visual-Motor Integration
-TRAILS A & B\t\tTrail Making Test - Parts A & B
-Rey-15\t\tRey 15-Item Memory Test
-ADOS-2\t\tAutism Diagnostic Observation Schedule
 """
 
 
@@ -210,21 +206,14 @@ def test_real_table_resolves(typed, code):
     assert build_lookup(real_table()).resolve(typed) == code
 
 
-def test_real_table_reports_the_psych_conflict():
+def test_real_table_has_no_problems():
+    assert build_lookup(real_table()).problems == []
+
+
+def test_real_table_psych_means_review_of_records():
+    # With the "Psych" alias gone from 90791, "psych" only matches
+    # 99358-PSYCH's own abbreviation. OA never notes the psychiatric
+    # exam, so this is intended.
     lookup = build_lookup(real_table())
-    assert lookup.is_ambiguous("Psych")
-    assert lookup.ambiguous["PSYCH"] == ["90791", "99358-PSYCH"]
-
-
-def test_real_table_skips_rows_without_codes():
-    lookup = build_lookup(real_table())
-    skipped = [p for p in lookup.problems if "isn't a valid service code" in p]
-    for name in ("Beery VMI", "TRAILS A & B", "Rey-15", "ADOS-2"):
-        assert any(name in p for p in skipped), f"{name} not reported"
-    assert len(skipped) == 4
-
-
-def test_real_table_has_no_other_problems():
-    # Only the four codeless rows and the PSYCH conflict. If this fails
-    # after the Services tab changes, update REAL_TABLE to match.
-    assert len(build_lookup(real_table()).problems) == 5
+    assert not lookup.is_ambiguous("psych")
+    assert lookup.resolve("psych") == "99358-PSYCH"
