@@ -75,18 +75,20 @@ def test_rerun_with_no_changes_writes_nothing():
     assert ws.writes == []
 
 
-def test_price_and_services_are_not_applied():
-    """Scope guard for Parts 1 and 2. Replace when Part 3 starts applying price and services."""
-    headers = ["Case ID", "Provider", "Psychometrist", "Price", "Comments"]
+def test_test_changes_are_not_applied():
+    """Scope guard: test changes aren't applied to the sheet yet. Replace once they are."""
+    headers = ["Case ID", "Provider", "Psychometrist", "Services Requested", "Price", "Comments"]
     ws = FakeWorksheet([
         headers,
-        ["15419897", "", "", "484.00",
-         "Provider: Dr. Shelton\n+Service: 96130 - Autism testing - $92\nPrice: $576"],
+        ["15419897", "", "", "1. 96101-WISC-V - Wechsler", "484.00",
+         "Provider: Dr. Shelton\nAdd: cars\nChange: wisc to wais"],
     ])
     apply_comment_updates(ws)
+    assert ws.value(2, "Provider") == "Dr. Shelton"
+    assert ws.value(2, "Services Requested") == "1. 96101-WISC-V - Wechsler"
     assert ws.value(2, "Price") == "484.00"
-    price_col = headers.index("Price") + 1
-    assert all(col != price_col for _, col, _ in ws.writes)
+    provider_col = headers.index("Provider") + 1
+    assert all(col == provider_col for _, col, _ in ws.writes)
 
 
 def test_columns_found_by_name_not_position():
@@ -125,7 +127,7 @@ def test_row_without_case_id_is_skipped_entirely(case_id):
 def test_template_in_caseless_row_is_left_alone():
     ws = make_sheet(
         ["15419897", "", "", "Provider: Dr. Shelton"],
-        ["", "", "", "Provider:\nPsychometrist:\n+Service:\nPrice:"],
+        ["", "", "", "Provider:\nPsychometrist:\nAdd:\nChange:"],
     )
     results = apply_comment_updates(ws)
     assert [r["case_id"] for r in results] == ["15419897"]
@@ -140,7 +142,7 @@ def test_row_with_empty_comment_is_skipped():
 
 
 def test_blank_template_on_a_case_changes_nothing():
-    ws = make_sheet(["15419897", "Dr. Shelton", "", "Provider:\nPsychometrist:\n+Service:\nPrice:"])
+    ws = make_sheet(["15419897", "Dr. Shelton", "", "Provider:\nPsychometrist:\nAdd:\nChange:"])
     results = apply_comment_updates(ws)
     assert results[0]["fields"] == {}
     assert ws.writes == []
@@ -190,7 +192,7 @@ def test_only_rows_with_problems_are_flagged():
 
 def test_crammed_line_does_not_overwrite_provider():
     ws = make_sheet(
-        ["15419897", "Dr. Shelton", "", "Provider: Dr. Doe +Service: 96130 - Autism testing - $92"],
+        ["15419897", "Dr. Shelton", "", "Provider: Dr. Doe Add: cars"],
     )
     apply_comment_updates(ws)
     assert ws.value(2, "Provider") == "Dr. Shelton"
@@ -201,7 +203,7 @@ def test_crammed_line_does_not_overwrite_provider():
 def test_correct_line_applies_alongside_skipped_crammed_line():
     ws = make_sheet(
         ["15419897", "Dr. Smith", "",
-         "Provider: Dr. Doe +Service: 96130 - Autism testing - $92\nProvider: Dr. Shelton"],
+         "Provider: Dr. Doe Add: cars\nProvider: Dr. Shelton"],
     )
     apply_comment_updates(ws)
     assert ws.value(2, "Provider") == "Dr. Shelton"

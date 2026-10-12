@@ -17,7 +17,7 @@ repeatedly against the same unchanged comment, Provider and
 Psychometrist are only written if they'd actually change. Each run
 records what happened to each field (updated, or already set), so
 the console reports real changes rather than just what the comment
-says. Price and +Service entries are deliberately out of scope here.
+says. Test changes (Add and Change) are deliberately out of scope here.
 
 Any parsed unrecognized_lines get flagged directly on the Comments
 cell (highlight + note), cleared automatically once the comment is
@@ -153,10 +153,8 @@ if __name__ == "__main__":
                 else:
                     print(f"  {field}: already {new}, no change")
 
-            if parsed.added_services:
-                print(f"  (Services present, not applied yet, Part 3): {parsed.added_services}")
-            if parsed.price_override:
-                print(f"  (Price present, not applied yet, Part 3): {parsed.price_override}")
+            if parsed.service_changes:
+                print(f"  (Test changes found, not applied yet): {parsed.service_changes}")
             if parsed.unrecognized_lines:
                 flagged.append(result["case_id"])
                 print(f"  NEEDS ATTENTION: {parsed.unrecognized_lines}")
