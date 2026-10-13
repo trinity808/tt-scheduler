@@ -425,24 +425,25 @@ def find_images_in_claimant_folder(
 def find_claimant_submission(
     dbx,
     date_folder,
+    expected_provider,
     expected_claimant,
 ):
     """
-    Searches ONLY inside the correct date folder.
+    Searches Dropbox in this order:
 
-    Expected structure:
+        Date
+        -> Provider
+        -> Claimant
+        -> Screenshot
 
-        /DateFolder
-            /ProviderName
-                /LastNameFirstName
-                    /Screenshot
-
-    ProviderName is taken directly from the Dropbox
-    folder hierarchy.
-
-    Returns all matches so the program can avoid
-    guessing if the same claimant appears twice.
+    Provider and claimant names are normalized before
+    comparison so capitalization, spaces, hyphens,
+    apostrophes, etc. do not affect matching.
     """
+
+    expected_provider_key = normalize_name(
+        expected_provider
+    )
 
     expected_claimant_key = normalize_name(
         expected_claimant
@@ -450,14 +451,16 @@ def find_claimant_submission(
 
     matches = []
 
-    # -----------------------------------------------------
-    # Provider folders
-    # -----------------------------------------------------
+    # =====================================================
+    # STEP 1: FIND PROVIDER FOLDER
+    # =====================================================
 
     provider_entries = list_folder_entries(
         dbx,
         date_folder,
     )
+
+    matching_provider = None
 
     for provider_entry in provider_entries:
 
@@ -467,71 +470,107 @@ def find_claimant_submission(
         ):
             continue
 
-        provider_name = provider_entry.name
-        provider_path = provider_entry.path_display
-
-        # -------------------------------------------------
-        # Claimant folders
-        # -------------------------------------------------
-
-        claimant_entries = list_folder_entries(
-            dbx,
-            provider_path,
+        provider_key = normalize_name(
+            provider_entry.name
         )
 
-        for claimant_entry in claimant_entries:
+        if provider_key == expected_provider_key:
+            matching_provider = provider_entry
+            break
 
-            if not isinstance(
-                claimant_entry,
-                dropbox.files.FolderMetadata,
-            ):
-                continue
+    if not matching_provider:
+        print(
+            "NO MATCH: Provider folder not found."
+        )
+        print(
+            "Expected Provider:",
+            expected_provider,
+        )
+        return []
 
-            claimant_folder_name = (
-                claimant_entry.name
+    provider_name = (
+        matching_provider.name
+    )
+
+    provider_path = (
+        matching_provider.path_display
+    )
+
+    print(
+        "Matched Provider folder:",
+        provider_name,
+    )
+
+    # =====================================================
+    # STEP 2: FIND CLAIMANT UNDER THAT PROVIDER
+    # =====================================================
+
+    claimant_entries = list_folder_entries(
+        dbx,
+        provider_path,
+    )
+
+    for claimant_entry in claimant_entries:
+
+        if not isinstance(
+            claimant_entry,
+            dropbox.files.FolderMetadata,
+        ):
+            continue
+
+        claimant_folder_name = (
+            claimant_entry.name
+        )
+
+        claimant_key = normalize_name(
+            claimant_folder_name
+        )
+
+        if claimant_key != expected_claimant_key:
+            continue
+
+        print(
+            "Matched claimant folder:",
+            claimant_folder_name,
+        )
+
+        # =================================================
+        # STEP 3: CHECK FOR SCREENSHOT
+        # =================================================
+
+        screenshots = (
+            find_images_in_claimant_folder(
+                dbx,
+                claimant_entry.path_display,
             )
+        )
 
-            dropbox_claimant_key = normalize_name(
-                claimant_folder_name
+        if not screenshots:
+            print(
+                "Claimant matched, but no "
+                "screenshot was found."
             )
+            continue
 
-            if dropbox_claimant_key != expected_claimant_key:
-                continue
+        screenshots.sort()
 
-            # ---------------------------------------------
-            # Screenshot check
-            # ---------------------------------------------
+        matches.append(
+            {
+                "provider": provider_name,
+                "claimant": claimant_folder_name,
+                "claimant_path": (
+                    claimant_entry.path_display
+                ),
+                "screenshot_path": (
+                    screenshots[0]
+                ),
+                "screenshot_count": (
+                    len(screenshots)
+                ),
+            }
+        )
 
-            screenshots = (
-                find_images_in_claimant_folder(
-                    dbx,
-                    claimant_entry.path_display,
-                )
-            )
-
-            if not screenshots:
-                continue
-
-            # Sort to make selection consistent.
-            screenshots.sort()
-
-            matches.append(
-                {
-                    "provider": provider_name,
-                    "claimant": claimant_folder_name,
-                    "claimant_path": (
-                        claimant_entry.path_display
-                    ),
-                    "screenshot_path": (
-                        screenshots[0]
-                    ),
-                    "screenshot_count": (
-                        len(screenshots)
-                    ),
-                }
-            )
-
-    return matches
+    return matches         
 
 
 # =========================================================
@@ -735,6 +774,27 @@ def move_matches():
 
         # =================================================
         # STEP 4
+        # Get Provider from Google Sheets
+        # =================================================
+
+        sheet_provider = str(
+            row.get("Provider", "")
+        ).strip()
+
+        if not sheet_provider:
+            print(
+                "SKIP: Provider is blank "
+                "in Google Sheets."
+            )
+            continue
+
+        print(
+            "Expected Provider folder:",
+            sheet_provider,
+        )
+
+        # =================================================
+        # STEP 5
         # Find claimant and screenshot
         # =================================================
 
@@ -742,6 +802,7 @@ def move_matches():
             find_claimant_submission(
                 dbx,
                 date_folder,
+                sheet_provider,
                 expected_claimant,
             )
         )
@@ -884,36 +945,6 @@ def move_matches():
         #
         # Dropbox provider remains authoritative here.
         # -------------------------------------------------
-
-        sheet_provider = str(
-            row.get("Provider", "")
-        ).strip()
-
-        if (
-            sheet_provider
-            and normalize_name(sheet_provider)
-            != normalize_name(dropbox_provider)
-        ):
-
-            print(
-                "NOTE: Provider in Google Sheet "
-                "differs from Dropbox."
-            )
-
-            print(
-                "Google Sheet Provider:",
-                sheet_provider,
-            )
-
-            print(
-                "Dropbox Provider:",
-                dropbox_provider,
-            )
-
-            print(
-                "Dropbox Provider will be used "
-                "in Finished."
-            )
 
         print(
             "*** MATCH FOUND ***"
