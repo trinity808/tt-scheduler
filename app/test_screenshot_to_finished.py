@@ -46,32 +46,51 @@ IMAGE_EXTENSIONS = {
 # GENERAL HELPERS
 # =========================================================
 
-def normalize(value):
+def normalize_name(value):
     """
-    Removes spaces/punctuation and converts to lowercase.
+    Converts names to one standard comparison format.
 
     Examples:
-        SmithJohn -> smithjohn
-        Smith-John -> smithjohn
-        Smith John -> smithjohn
+
+        KhannaAnand      -> khannaanand
+        KHANNAANAND      -> khannaanand
+        Khanna Anand     -> khannaanand
+        Khanna-Anand     -> khannaanand
+        Khanna_Anand     -> khannaanand
+        Khanna, Anand    -> khannaanand
+        O'BrienJames     -> obrienjames
+        OBrienJames      -> obrienjames
     """
 
+    value = str(value).strip().lower()
+
+    # Remove spaces, hyphens, apostrophes, commas,
+    # underscores, periods, and all other punctuation.
     return re.sub(
-        r"[^a-zA-Z0-9]",
+        r"[^a-z0-9]",
         "",
-        str(value),
-    ).lower()
+        value,
+    )
 
 
 def patient_name_to_claimant_folder(patient_name):
     """
-    Converts the Patient Name from Google Sheets into
+    Converts Patient Name from Google Sheets into
     Dropbox's LastNameFirstName format.
 
     Examples:
-        John Smith -> SmithJohn
-        John A. Smith -> SmithJohn
-        Smith, John -> SmithJohn
+
+        Anand Khanna
+        -> KhannaAnand
+
+        Anand R. Khanna
+        -> KhannaAnand
+
+        Khanna, Anand
+        -> KhannaAnand
+
+        James O'Brien
+        -> O'BrienJames
     """
 
     patient_name = str(patient_name).strip()
@@ -79,23 +98,23 @@ def patient_name_to_claimant_folder(patient_name):
     if not patient_name:
         return ""
 
-    # Example:
-    # Smith, John
+    # Handle:
+    # Khanna, Anand
     if "," in patient_name:
         last_name, remainder = patient_name.split(",", 1)
 
-        remainder_parts = remainder.strip().split()
+        name_parts = remainder.strip().split()
 
-        if not remainder_parts:
+        if not name_parts:
             return ""
 
-        first_name = remainder_parts[0]
+        first_name = name_parts[0]
 
         return f"{last_name.strip()}{first_name}"
 
-    # Example:
-    # John Smith
-    # John A. Smith
+    # Handle:
+    # Anand Khanna
+    # Anand R. Khanna
     parts = patient_name.split()
 
     if len(parts) < 2:
@@ -105,7 +124,6 @@ def patient_name_to_claimant_folder(patient_name):
     last_name = parts[-1]
 
     return f"{last_name}{first_name}"
-
 
 # =========================================================
 # DATE HELPERS
@@ -259,7 +277,7 @@ def find_child_folder(
     """
 
     wanted_names = {
-        normalize(name)
+        normalize_name(name)
         for name in possible_names
     }
 
@@ -276,7 +294,7 @@ def find_child_folder(
         ):
             continue
 
-        if normalize(entry.name) in wanted_names:
+        if normalize_name(entry.name) in wanted_names:
             return entry.path_display
 
     return None
@@ -426,7 +444,7 @@ def find_claimant_submission(
     guessing if the same claimant appears twice.
     """
 
-    expected_claimant_key = normalize(
+    expected_claimant_key = normalize_name(
         expected_claimant
     )
 
@@ -473,10 +491,11 @@ def find_claimant_submission(
                 claimant_entry.name
             )
 
-            if (
-                normalize(claimant_folder_name)
-                != expected_claimant_key
-            ):
+            dropbox_claimant_key = normalize_name(
+                claimant_folder_name
+            )
+
+            if dropbox_claimant_key != expected_claimant_key:
                 continue
 
             # ---------------------------------------------
@@ -872,8 +891,8 @@ def move_matches():
 
         if (
             sheet_provider
-            and normalize(sheet_provider)
-            != normalize(dropbox_provider)
+            and normalize_name(sheet_provider)
+            != normalize_name(dropbox_provider)
         ):
 
             print(
