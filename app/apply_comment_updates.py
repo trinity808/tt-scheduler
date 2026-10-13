@@ -17,7 +17,9 @@ repeatedly against the same unchanged comment, Provider and
 Psychometrist are only written if they'd actually change. Each run
 records what happened to each field (updated, or already set), so
 the console reports real changes rather than just what the comment
-says. Test changes (Add and Change) are deliberately out of scope here.
+says. Test changes (Add and Change) are resolved through the lookup when one
+is given, so unknown or ambiguous tests are flagged on the comment
+like any other problem. They are not applied to the sheet yet.
 
 Any parsed unrecognized_lines get flagged directly on the Comments
 cell (highlight + note), cleared automatically once the comment is
@@ -57,11 +59,16 @@ def flag_comment_issues(worksheet, cell, unrecognized_lines):
         worksheet.clear_note(cell)
 
 
-def apply_comment_updates(worksheet):
+def apply_comment_updates(worksheet, lookup=None):
     """
     Reads every case row's Comments cell, parses it, applies
     Provider/Psychometrist where present and changed, and flags the
     Comments cell if the parse found anything worth attention.
+
+    `lookup` is a ServiceLookup (see service_lookup.py). With one,
+    Add and Change lines are resolved to real test codes; without one,
+    they're flagged as "services list not loaded". Provider and
+    Psychometrist don't depend on it.
 
     Returns a list of dicts, one per case row with a non-empty
     comment:
@@ -98,7 +105,7 @@ def apply_comment_updates(worksheet):
         if not comment_text.strip():
             continue
 
-        parsed = parse_comment(comment_text)
+        parsed = parse_comment(comment_text, lookup)
 
         field_outcomes = {}
         for field, new_value, idx in (
