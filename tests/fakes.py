@@ -83,6 +83,9 @@ class FakeWorksheet:
     def clear_note(self, cell):
         self.notes.pop(cell, None)
 
+    def get_note(self, cell):
+        return self.notes.get(cell, "")
+
     # --- test helper ---
 
     def value(self, row_number, header):

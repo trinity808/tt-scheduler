@@ -71,3 +71,53 @@ def load_services_tab(spreadsheet):
         problems=list(lookup.problems),
         worksheet=worksheet,
     )
+
+
+# --- Flagging problems on the tab itself -----------------------------
+
+NOTE_CELL = "A1"  # the header cell; always exists, and is what an editor sees first
+NOTE_HEADER = "Services tab needs attention:"
+NOTE_FOOTER = "This note clears itself once these are fixed."
+
+
+def _note_text(problems):
+    lines = [NOTE_HEADER] + [f"- {problem}" for problem in problems] + [NOTE_FOOTER]
+    return "\n".join(lines)
+
+
+def flag_services_tab(worksheet, problems):
+    """
+    Puts a note on the Services tab's header cell listing `problems`,
+    and removes it once there are none. Only a note this function wrote
+    (recognized by its opening line) is ever replaced or cleared. A note
+    a person wrote themselves is left alone, so the problem can't be
+    flagged on the tab then and "skipped" is returned for the caller to
+    report. Formatting is never touched, since the header probably has
+    its own and there's no way to know what to restore.
+
+    Returns one of:
+      "flagged"    a note was written or updated
+      "cleared"    our note was removed because the table is clean
+      "unchanged"  nothing needed doing
+      "skipped"    there are problems but A1 holds someone else's note
+      "no_tab"     there's no Services tab to put a note on
+    """
+    if worksheet is None:
+        return "no_tab"
+
+    current = worksheet.get_note(NOTE_CELL)
+    is_ours = current.startswith(NOTE_HEADER)
+
+    if problems:
+        desired = _note_text(problems)
+        if current.strip() == desired.strip():
+            return "unchanged"
+        if current and not is_ours:
+            return "skipped"
+        worksheet.update_note(NOTE_CELL, desired)
+        return "flagged"
+
+    if is_ours:
+        worksheet.clear_note(NOTE_CELL)
+        return "cleared"
+    return "unchanged"

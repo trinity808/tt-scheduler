@@ -1,6 +1,7 @@
 """
 Tests for app/services_tab.py: loading the Services tab into a lookup,
-and carrying on without one when the tab can't be used.
+carrying on without one when the tab can't be used, and flagging problems
+with a note on the tab's header cell.
 
 Uses the shared in-memory fakes from tests/fakes.py, so no Google
 Sheet is involved.
@@ -11,7 +12,14 @@ Run from the project root:
 
 import pytest
 
-from app.services_tab import SERVICES_TAB, load_services_tab
+from app.services_tab import (
+    NOTE_CELL,
+    NOTE_FOOTER,
+    NOTE_HEADER,
+    SERVICES_TAB,
+    flag_services_tab,
+    load_services_tab,
+)
 from tests.fakes import FakeSpreadsheet, FakeWorksheet
 
 
@@ -141,3 +149,109 @@ def test_other_errors_are_not_mistaken_for_a_missing_tab():
 
     with pytest.raises(RuntimeError):
         load_services_tab(Unreachable({}))
+
+
+# --- Flagging problems on the tab -----------------------------------
+
+PROBLEM_A = "Row 5: 'Beery VMI' isn't a valid service code, so it was skipped"
+PROBLEM_B = "'PSYCH' matches more than one code, so it won't be accepted"
+
+
+def test_problems_are_written_as_a_note_on_the_header_cell():
+    ws = services_ws(["96101-WISC-V", "WISC", ""])
+    assert flag_services_tab(ws, [PROBLEM_A]) == "flagged"
+    assert ws.notes[NOTE_CELL].startswith(NOTE_HEADER)
+    assert NOTE_CELL == "A1"
+
+
+def test_note_lists_every_problem_and_ends_with_the_clearing_hint():
+    ws = services_ws(["96101-WISC-V", "WISC", ""])
+    flag_services_tab(ws, [PROBLEM_A, PROBLEM_B])
+    lines = ws.notes[NOTE_CELL].split("\n")
+    assert lines[0] == NOTE_HEADER
+    assert f"- {PROBLEM_A}" in lines
+    assert f"- {PROBLEM_B}" in lines
+    assert lines[-1] == NOTE_FOOTER
+
+
+def test_formatting_is_never_touched():
+    ws = services_ws(["96101-WISC-V", "WISC", ""])
+    flag_services_tab(ws, [PROBLEM_A])
+    flag_services_tab(ws, [])
+    assert ws.formats == {}
+    assert ws.writes == []
+
+
+def test_our_note_is_cleared_once_the_table_is_clean():
+    ws = services_ws(["96101-WISC-V", "WISC", ""])
+    flag_services_tab(ws, [PROBLEM_A])
+    assert flag_services_tab(ws, []) == "cleared"
+    assert NOTE_CELL not in ws.notes
+
+
+def test_clean_table_with_no_note_does_nothing():
+    ws = services_ws(["96101-WISC-V", "WISC", ""])
+    assert flag_services_tab(ws, []) == "unchanged"
+    assert ws.notes == {}
+
+
+class NoteCountingWorksheet(FakeWorksheet):
+    note_writes = 0
+
+    def update_note(self, cell, text):
+        self.note_writes += 1
+        super().update_note(cell, text)
+
+
+def test_identical_note_is_not_rewritten():
+    ws = NoteCountingWorksheet([HEADERS, ["96101-WISC-V", "WISC", ""]])
+    flag_services_tab(ws, [PROBLEM_A])
+    assert flag_services_tab(ws, [PROBLEM_A]) == "unchanged"
+    assert ws.note_writes == 1
+
+
+def test_note_is_updated_when_the_problems_change():
+    ws = services_ws(["96101-WISC-V", "WISC", ""])
+    flag_services_tab(ws, [PROBLEM_A])
+    assert flag_services_tab(ws, [PROBLEM_A, PROBLEM_B]) == "flagged"
+    assert PROBLEM_B in ws.notes[NOTE_CELL]
+
+
+def test_someone_elses_note_is_left_alone_when_the_table_is_clean():
+    ws = services_ws(["96101-WISC-V", "WISC", ""])
+    ws.notes[NOTE_CELL] = "Ask OA before changing the Code column"
+    assert flag_services_tab(ws, []) == "unchanged"
+    assert ws.notes[NOTE_CELL] == "Ask OA before changing the Code column"
+
+
+def test_someone_elses_note_is_not_overwritten_when_there_are_problems():
+    ws = services_ws(["96101-WISC-V", "WISC", ""])
+    ws.notes[NOTE_CELL] = "Ask OA before changing the Code column"
+    assert flag_services_tab(ws, [PROBLEM_A]) == "skipped"
+    assert ws.notes[NOTE_CELL] == "Ask OA before changing the Code column"
+
+
+def test_no_tab_means_nothing_to_flag():
+    assert flag_services_tab(None, [PROBLEM_A]) == "no_tab"
+
+
+def test_an_unusable_tab_is_flagged_with_why():
+    ws = FakeWorksheet([["Name", "Aliases"], ["Wechsler", "WISC"]])
+    tab = load_services_tab(spreadsheet(ws))
+    assert flag_services_tab(tab.worksheet, tab.problems) == "flagged"
+    assert "missing the 'Code' column" in ws.notes[NOTE_CELL]
+
+
+def test_load_then_flag_then_fix_then_flag_again():
+    ws = services_ws(
+        ["96101-WISC-V", "WISC", ""],
+        ["Beery VMI", "", ""],
+    )
+    first = load_services_tab(spreadsheet(ws))
+    assert flag_services_tab(first.worksheet, first.problems) == "flagged"
+    assert "Beery VMI" in ws.notes[NOTE_CELL]
+
+    ws.rows.pop()  # someone deletes the bad row
+    second = load_services_tab(spreadsheet(ws))
+    assert flag_services_tab(second.worksheet, second.problems) == "cleared"
+    assert NOTE_CELL not in ws.notes
