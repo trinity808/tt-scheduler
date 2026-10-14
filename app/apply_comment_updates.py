@@ -21,16 +21,25 @@ says. Test changes (Add and Change) are resolved through the lookup when one
 is given, so unknown or ambiguous tests are flagged on the comment
 like any other problem. They are not applied to the sheet yet.
 
+run_sweep() is the single entry point: it loads the Services tab,
+flags any problems on it, and sweeps the Ongoing tab with the lookup.
+
 Any parsed unrecognized_lines get flagged directly on the Comments
 cell (highlight + note), cleared automatically once the comment is
 fixed and reparses clean, since this reflects the comment's current
 state, not a one-time event.
 """
 
+from dataclasses import dataclass
+
 from gspread.utils import rowcol_to_a1
 
 from app.comment_parser import parse_comment
+from app.services_tab import ServicesTab, flag_services_tab, load_services_tab
 from app.sheet_client import get_header_map, update_case_field
+
+
+ONGOING_TAB = "Ongoing"
 
 
 # Orange, distinct from the yellow used to flag duplicate cases in
@@ -127,6 +136,32 @@ def apply_comment_updates(worksheet, lookup=None):
         results.append({"case_id": case_id, "parsed": parsed, "fields": field_outcomes})
 
     return results
+
+
+@dataclass
+class SweepReport:
+    results: list          # per-case results from apply_comment_updates()
+    services: ServicesTab  # what loading the Services tab produced
+    services_flag: str     # what flag_services_tab() did: "flagged", "cleared",
+                           # "unchanged", "skipped" or "no_tab"
+
+
+def run_sweep(spreadsheet):
+    """
+    One full pass: load the Services tab, flag any problems on it, then
+    sweep the Ongoing tab with the resulting lookup.
+
+    A Services tab that can't be used never stops the sweep. Provider
+    and Psychometrist still apply, and test lines are flagged as
+    "services list not loaded". A missing Ongoing tab does stop it
+    (WorksheetNotFound), since there's nothing to sweep.
+    """
+    services = load_services_tab(spreadsheet)
+    services_flag = flag_services_tab(services.worksheet, services.problems)
+    results = apply_comment_updates(
+        spreadsheet.worksheet(ONGOING_TAB), services.lookup
+    )
+    return SweepReport(results=results, services=services, services_flag=services_flag)
 
 
 if __name__ == "__main__":
