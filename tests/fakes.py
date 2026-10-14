@@ -72,6 +72,13 @@ class FakeWorksheet:
     def add_rows(self, n):
         self.row_count += n
         self.rows_added += n
+        
+    def delete_rows(self, start_index, end_index=None):
+        # Like real Sheets: the rows below shift up, and the sheet
+        # itself gets that many rows shorter.
+        end_index = end_index or start_index
+        del self.rows[start_index - 1:end_index]
+        self.row_count -= end_index - start_index + 1
 
     def format(self, cell_range, fmt):
         self.formats[cell_range] = fmt
