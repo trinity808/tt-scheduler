@@ -166,47 +166,7 @@ def run_sweep(spreadsheet):
 
 if __name__ == "__main__":
     from app.sheet_client import get_client
+    from app.sweep_report import format_report
 
-    sh = get_client()
-    ongoing = sh.worksheet("Ongoing")
-
-    results = apply_comment_updates(ongoing)
-
-    if not results:
-        print("No rows had a comment to process.")
-    else:
-        updated_count = 0
-        flagged = []
-
-        for result in results:
-            parsed = result["parsed"]
-            print(f"\nCase {result['case_id']}:")
-
-            if not result["fields"] and not parsed.unrecognized_lines:
-                print("  No Provider/Psychometrist in comment")
-
-            for field, (status, old, new) in result["fields"].items():
-                if status == "updated":
-                    updated_count += 1
-                    if old:
-                        print(f"  {field}: updated from {old} to {new}")
-                    else:
-                        print(f"  {field}: set to {new}")
-                else:
-                    print(f"  {field}: already {new}, no change")
-
-            if parsed.service_changes:
-                print(f"  (Test changes found, not applied yet): {parsed.service_changes}")
-            if parsed.unrecognized_lines:
-                flagged.append(result["case_id"])
-                print(f"  NEEDS ATTENTION: {parsed.unrecognized_lines}")
-
-        print(
-            f"\n{len(results)} comment(s) processed, "
-            f"{updated_count} field(s) updated, "
-            f"{len(flagged)} flagged for attention."
-        )
-        if flagged:
-            print("Flagged cases:", ", ".join(flagged))
-
+    print(format_report(run_sweep(get_client())))
     input("\nPress Enter to close...")
