@@ -1,6 +1,7 @@
 import pdfplumber
 import re
 from datetime import datetime
+from app.service_format import SERVICE_CODE_PATTERN
 
 
 MONTHS = (
@@ -278,7 +279,7 @@ def extract_services(page2_text):
 
         service_match = re.match(
             rf"(({MONTHS})\s+\d{{1,2}}(?:st|nd|rd|th)?,\s+\d{{4}})\s+"
-            r"(\d{5}[\w\-]*)\s+"
+            rf"({SERVICE_CODE_PATTERN})\s+"
             r"(.+?)\s+\$(\d+\.\d+)",
             line
         )

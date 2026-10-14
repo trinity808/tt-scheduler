@@ -37,3 +37,4 @@ Desktop.ini
 templates/
 testing pdfs/
 config/service_account.json
+.pytest_cache/

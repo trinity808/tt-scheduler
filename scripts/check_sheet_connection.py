@@ -1,8 +1,10 @@
 """
-Google Sheets sandbox — connection test.
+Live check: confirms the service account can authenticate and read
+both tabs of the Google Sheet set in .env.
 
-Confirms the service account can authenticate and read both tabs.
-Run this once headers are added to row 1 of each tab.
+Not part of the pytest suite, since it needs real credentials and
+network access. Run from the project root:
+    python scripts/check_sheet_connection.py
 """
 
 import os
