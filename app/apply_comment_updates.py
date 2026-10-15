@@ -17,7 +17,12 @@ repeatedly against the same unchanged comment, Provider and
 Psychometrist are only written if they'd actually change. Each run
 records what happened to each field (updated, or already set), so
 the console reports real changes rather than just what the comment
-says. Test changes (Add and Change) are deliberately out of scope here.
+says. Test changes (Add and Change) are resolved through the lookup when one
+is given, so unknown or ambiguous tests are flagged on the comment
+like any other problem. They are not applied to the sheet yet.
+
+run_sweep() is the single entry point: it loads the Services tab,
+flags any problems on it, and sweeps the Ongoing tab with the lookup.
 
 Any parsed unrecognized_lines get flagged directly on the Comments
 cell (highlight + note), cleared automatically once the comment is
@@ -25,10 +30,16 @@ fixed and reparses clean, since this reflects the comment's current
 state, not a one-time event.
 """
 
+from dataclasses import dataclass
+
 from gspread.utils import rowcol_to_a1
 
 from app.comment_parser import parse_comment
+from app.services_tab import ServicesTab, flag_services_tab, load_services_tab
 from app.sheet_client import get_header_map, update_case_field
+
+
+ONGOING_TAB = "Ongoing"
 
 
 # Orange, distinct from the yellow used to flag duplicate cases in
@@ -57,11 +68,16 @@ def flag_comment_issues(worksheet, cell, unrecognized_lines):
         worksheet.clear_note(cell)
 
 
-def apply_comment_updates(worksheet):
+def apply_comment_updates(worksheet, lookup=None):
     """
     Reads every case row's Comments cell, parses it, applies
     Provider/Psychometrist where present and changed, and flags the
     Comments cell if the parse found anything worth attention.
+
+    `lookup` is a ServiceLookup (see service_lookup.py). With one,
+    Add and Change lines are resolved to real test codes; without one,
+    they're flagged as "services list not loaded". Provider and
+    Psychometrist don't depend on it.
 
     Returns a list of dicts, one per case row with a non-empty
     comment:
@@ -98,7 +114,7 @@ def apply_comment_updates(worksheet):
         if not comment_text.strip():
             continue
 
-        parsed = parse_comment(comment_text)
+        parsed = parse_comment(comment_text, lookup)
 
         field_outcomes = {}
         for field, new_value, idx in (
@@ -122,49 +138,35 @@ def apply_comment_updates(worksheet):
     return results
 
 
+@dataclass
+class SweepReport:
+    results: list          # per-case results from apply_comment_updates()
+    services: ServicesTab  # what loading the Services tab produced
+    services_flag: str     # what flag_services_tab() did: "flagged", "cleared",
+                           # "unchanged", "skipped" or "no_tab"
+
+
+def run_sweep(spreadsheet):
+    """
+    One full pass: load the Services tab, flag any problems on it, then
+    sweep the Ongoing tab with the resulting lookup.
+
+    A Services tab that can't be used never stops the sweep. Provider
+    and Psychometrist still apply, and test lines are flagged as
+    "services list not loaded". A missing Ongoing tab does stop it
+    (WorksheetNotFound), since there's nothing to sweep.
+    """
+    services = load_services_tab(spreadsheet)
+    services_flag = flag_services_tab(services.worksheet, services.problems)
+    results = apply_comment_updates(
+        spreadsheet.worksheet(ONGOING_TAB), services.lookup
+    )
+    return SweepReport(results=results, services=services, services_flag=services_flag)
+
+
 if __name__ == "__main__":
     from app.sheet_client import get_client
+    from app.sweep_report import format_report
 
-    sh = get_client()
-    ongoing = sh.worksheet("Ongoing")
-
-    results = apply_comment_updates(ongoing)
-
-    if not results:
-        print("No rows had a comment to process.")
-    else:
-        updated_count = 0
-        flagged = []
-
-        for result in results:
-            parsed = result["parsed"]
-            print(f"\nCase {result['case_id']}:")
-
-            if not result["fields"] and not parsed.unrecognized_lines:
-                print("  No Provider/Psychometrist in comment")
-
-            for field, (status, old, new) in result["fields"].items():
-                if status == "updated":
-                    updated_count += 1
-                    if old:
-                        print(f"  {field}: updated from {old} to {new}")
-                    else:
-                        print(f"  {field}: set to {new}")
-                else:
-                    print(f"  {field}: already {new}, no change")
-
-            if parsed.service_changes:
-                print(f"  (Test changes found, not applied yet): {parsed.service_changes}")
-            if parsed.unrecognized_lines:
-                flagged.append(result["case_id"])
-                print(f"  NEEDS ATTENTION: {parsed.unrecognized_lines}")
-
-        print(
-            f"\n{len(results)} comment(s) processed, "
-            f"{updated_count} field(s) updated, "
-            f"{len(flagged)} flagged for attention."
-        )
-        if flagged:
-            print("Flagged cases:", ", ".join(flagged))
-
+    print(format_report(run_sweep(get_client())))
     input("\nPress Enter to close...")
