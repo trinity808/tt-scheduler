@@ -2,7 +2,7 @@
 Tests for app/case_metadata.py: storing and reading each case's original
 test list as hidden row metadata.
 
-These use an in-memory client defined in this file, so no Google Sheet is
+These use the in-memory client in tests/fake_metadata.py, so no Google Sheet is
 involved. That also means they can't show how real Sheets behaves (metadata
 following a row through a sort, say, which was checked separately on the
 sandbox sheet), only that this logic uses the client correctly.
@@ -14,51 +14,13 @@ Run from the project root:
 import pytest
 
 from app.case_metadata import (
-    CASE_TESTS_KEY,
-    MetadataEntry,
     decode_case_tests,
     encode_case_tests,
+    original_tests_for_row,
     read_all_case_tests,
     set_case_tests,
-    original_tests_for_row,
 )
-
-
-class FakeMetadataClient:
-    """An in-memory stand-in for the three operations the logic needs."""
-
-    def __init__(self):
-        self.entries = []   # MetadataEntry
-        self.keys = {}      # metadata_id -> key
-        self.next_id = 1
-        self.searches = 0
-        self.fail_create = False
-
-    def search(self, key):
-        self.searches += 1
-        return [e for e in self.entries if self.keys[e.metadata_id] == key]
-
-    def create(self, row_number, key, value):
-        if self.fail_create:
-            raise RuntimeError("API error")
-        entry = MetadataEntry(self.next_id, row_number, value)
-        self.keys[entry.metadata_id] = key
-        self.entries.append(entry)
-        self.next_id += 1
-
-    def delete(self, metadata_id):
-        self.entries = [e for e in self.entries if e.metadata_id != metadata_id]
-
-    # --- test helpers ---
-
-    def put(self, row_number, value, key=CASE_TESTS_KEY):
-        self.create(row_number, key, value)
-
-    def values_on(self, row_number, key=CASE_TESTS_KEY):
-        return [
-            e.value for e in self.entries
-            if e.row_number == row_number and self.keys[e.metadata_id] == key
-        ]
+from tests.fake_metadata import FakeMetadataClient
 
 
 TESTS = ["96101-WISC-V", "90791", "96130-AUTISM"]
