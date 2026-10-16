@@ -1,3 +1,32 @@
+"""
+Match Dropbox screenshot submissions to cases in the Ongoing Google Sheet.
+
+Flow:
+1. Read each case from the Ongoing sheet.
+2. Parse the case's scheduled date and locate the matching Dropbox date folder.
+3. Match the Provider folder using the Provider value from Google Sheets.
+4. Convert Patient Name to Dropbox's LastNameFirstName format and match the
+   claimant folder.
+5. Confirm that the claimant folder contains a screenshot/image.
+6. Read the screenshot's Dropbox server_modified timestamp.
+7. Convert the UTC timestamp to America/Phoenix for Date Completed.
+8. Move the matched case from Ongoing to Finished using the shared
+   move_case_to_finished() helper.
+
+Matching rules:
+- Provider and claimant names are compared after normalization.
+- Matching ignores capitalization, spaces, hyphens, underscores, apostrophes,
+  commas, and other punctuation.
+- Matching is exact after normalization; fuzzy matching is not used.
+- Missing matches are skipped rather than guessed.
+- Ambiguous matches are skipped rather than choosing one automatically.
+- The Dropbox year/root folder is configured through DROPBOX_YEAR_FOLDER.
+
+The matcher defaults to dry-run mode. The script
+scripts/check_screenshot_to_finished.py must be run with --live to make
+changes to Google Sheets.
+"""
+
 import re
 import os
 from datetime import datetime
@@ -7,8 +36,12 @@ import dropbox
 import gspread
 from dotenv import load_dotenv
 
-from apis.dropbox_api import get_dropbox_client
+from apis.dropbox_api import (
+    get_dropbox_client, 
+    list_folder_entries,
+)
 from apis.dropbox_metadata import get_file_upload_time
+from app.sheet_case_mover import move_case_to_finished
 
 
 load_dotenv()
@@ -21,7 +54,14 @@ SERVICE_ACCOUNT_FILE = os.getenv(
     "config/service_account.json",
 )
 
-DROPBOX_YEAR_FOLDER = "/2026"
+DROPBOX_YEAR_FOLDER = os.getenv(
+    "DROPBOX_YEAR_FOLDER"
+)
+
+if not DROPBOX_YEAR_FOLDER:
+    raise ValueError(
+        "DROPBOX_YEAR_FOLDER is missing from .env"
+    )
 
 IMAGE_EXTENSIONS = {
     ".png",
@@ -191,55 +231,6 @@ def parse_schedule_datetime(value):
 
     return None
 
-# =========================================================
-# DROPBOX HELPERS
-# =========================================================
-
-def list_folder_entries(dbx, folder_path):
-    """
-    Lists everything directly inside one Dropbox folder.
-    Handles Dropbox pagination.
-    """
-
-    result = dbx.files_list_folder(
-        folder_path
-    )
-
-    entries = list(result.entries)
-
-    while result.has_more:
-        result = dbx.files_list_folder_continue(
-            result.cursor
-        )
-
-        entries.extend(
-            result.entries
-        )
-
-    return entries
-
-def list_folder_recursive(dbx, folder_path):
-    """
-    Recursively lists everything inside a Dropbox folder.
-    """
-
-    result = dbx.files_list_folder(
-        folder_path,
-        recursive=True,
-    )
-
-    entries = list(result.entries)
-
-    while result.has_more:
-        result = dbx.files_list_folder_continue(
-            result.cursor
-        )
-
-        entries.extend(
-            result.entries
-        )
-
-    return entries
 
 def find_child_folder(
     dbx,
@@ -260,7 +251,6 @@ def find_child_folder(
     }
 
     entries = list_folder_entries(
-        dbx,
         parent_path,
     )
 
@@ -368,9 +358,9 @@ def find_images_in_claimant_folder(
         /SmithJohn/Screenshot/screenshot.png
     """
 
-    entries = list_folder_recursive(
-        dbx,
+    entries = list_folder_entries(
         claimant_folder_path,
+         recursive=True,
     )
 
     image_files = []
@@ -430,7 +420,6 @@ def find_claimant_submission(
     # =====================================================
 
     provider_entries = list_folder_entries(
-        dbx,
         date_folder,
     )
 
@@ -480,7 +469,6 @@ def find_claimant_submission(
     # =====================================================
 
     claimant_entries = list_folder_entries(
-        dbx,
         provider_path,
     )
 
@@ -547,18 +535,20 @@ def find_claimant_submission(
     return matches    
 
 def move_matches(dry_run=True):
-    """
-    Workflow:
+     """
+    Match completed Dropbox screenshot submissions to Ongoing cases.
 
-    1. Read Ongoing rows.
-    2. Read Date & Time.
-    3. Find matching Dropbox date folder.
-    4. Convert Patient Name -> LastNameFirstName.
-    5. Search that date for claimant.
-    6. Verify screenshot exists.
-    7. Get Provider from Dropbox hierarchy.
-    8. Get screenshot upload time from Dropbox metadata.
-    9. Move Ongoing -> Finished.
+    For each Ongoing case, locate the matching Dropbox date, provider,
+    claimant, and screenshot. The screenshot upload timestamp is converted
+    from UTC to America/Phoenix and used as Date Completed.
+
+    When dry_run is True, matching results are displayed but Google Sheets
+    are not modified. When dry_run is False, matched cases are moved from
+    Ongoing to Finished using move_case_to_finished().
+
+    Args:
+        dry_run: If True, report matches without modifying Google Sheets.
+            Defaults to True.
     """
 
     if not SHEET_ID:
@@ -600,12 +590,7 @@ def move_matches(dry_run=True):
     print("CHECKING ONGOING RECORDS")
     print("================================")
 
-    # Row 1 contains headers.
-    # Actual data starts at row 2.
-    for sheet_row_number, row in enumerate(
-        rows,
-        start=2,
-    ):
+    for row in rows:
 
         case_id = str(
             row.get("Case ID", "")
@@ -921,9 +906,6 @@ def move_matches(dry_run=True):
 
         matches_to_move.append(
             {
-                "row_number": (
-                    sheet_row_number
-                ),
                 "row": row,
                 "provider": (
                     dropbox_provider
@@ -1020,20 +1002,8 @@ def move_matches(dry_run=True):
         )
 
         print(
-            "\nIf everything above is correct, "
-            "change:"
-        )
-
-        print(
-            "DRY_RUN = True"
-        )
-
-        print(
-            "to:"
-        )
-
-        print(
-            "DRY_RUN = False"
+            "\nTo perform the actual move, run "
+            "move_matches(dry_run=False)."
         )
 
         return
@@ -1041,16 +1011,6 @@ def move_matches(dry_run=True):
     # =====================================================
     # ACTUALLY MOVE RECORDS
     # =====================================================
-
-    # Delete from bottom to top.
-    # This prevents row numbers from changing
-    # while records are being removed.
-    matches_to_move.sort(
-        key=lambda item: item[
-            "row_number"
-        ],
-        reverse=True,
-    )
 
     print("\n================================")
     print("MOVING RECORDS")
@@ -1060,81 +1020,35 @@ def move_matches(dry_run=True):
 
         row = match["row"]
 
-        # Finished columns:
-        #
-        # Case ID
-        # Patient Name
-        # Phone
-        # Psychometrist
-        # Provider
-        # Price
-        # Payment Status
-        # Date Completed
+        case_id = str(
+            row.get("Case ID", "")
+        ).strip()
 
-        finished_row = [
-            row.get(
-                "Case ID",
-                "",
-            ),
+        if not case_id:
+            print(
+                "SKIP: Case ID is blank for",
+                row.get("Patient Name", ""),
+            )
+            continue
 
-            row.get(
-                "Patient Name",
-                "",
-            ),
-
-            row.get(
-                "Phone",
-                "",
-            ),
-
-            row.get(
-                "Psychometrist",
-                "",
-            ),
-
-            # Provider from Dropbox
-            match["provider"],
-
-            row.get(
-                "Price",
-                "",
-            ),
-
-            # Payment Status
-            # Leave blank for now.
-            "",
-
-            # Date Completed
-            # Dropbox screenshot upload time
-            match[
-                "upload_time"
-            ].strftime(
-                "%m/%d/%Y %I:%M %p"
-            ),
-        ]
-
-        # -------------------------------------------------
-        # SAFETY:
-        #
-        # Add to Finished FIRST.
-        # Only delete Ongoing if append succeeds.
-        # -------------------------------------------------
-
-        finished.append_row(
-            finished_row,
-            value_input_option="USER_ENTERED",
+        date_completed = match[
+            "upload_time"
+        ].strftime(
+            "%m/%d/%Y %I:%M %p"
         )
 
-        ongoing.delete_rows(
-            match["row_number"]
+        move_case_to_finished(
+            ongoing_ws=ongoing,
+            finished_ws=finished,
+            case_id=case_id,
+            extra_fields={
+                "Date Completed": date_completed,
+            },
         )
 
         print(
             "MOVED:",
-            row.get(
-                "Case ID",
-                "",
-            ),
+            case_id,
             "-",
             row.get(
                 "Patient Name",
@@ -1149,11 +1063,7 @@ def move_matches(dry_run=True):
 
         print(
             "Date Completed:",
-            match[
-                "upload_time"
-            ].strftime(
-                "%m/%d/%Y %I:%M %p"
-            ),
+            date_completed,
         )
 
     # =====================================================

@@ -154,18 +154,27 @@ def move_file(from_path, to_path):
         print(f"Failed to move Dropbox file: {e}")
         raise
 
-def debug_walk_2026():
+def list_folder_entries(folder_path, recursive=False):
+    """
+    Return all entries inside a Dropbox folder.
+
+    Handles Dropbox pagination.
+    """
+
     dbx = get_dropbox_client()
 
-    root_path = "/2026"
+    result = dbx.files_list_folder(
+        folder_path,
+        recursive=recursive,
+    )
 
-    print(f"\nLooking inside: {root_path}")
+    entries = list(result.entries)
 
-    result = dbx.files_list_folder(root_path)
-
-    for entry in result.entries:
-        print(
-            entry.__class__.__name__,
-            entry.name,
-            entry.path_display
+    while result.has_more:
+        result = dbx.files_list_folder_continue(
+            result.cursor
         )
+
+        entries.extend(result.entries)
+
+    return entries

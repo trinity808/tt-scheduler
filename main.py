@@ -1,5 +1,6 @@
 import os
 import sys
+
 from app.config_loader import load_config
 from app.health_monitor import (
     get_logger,
@@ -13,8 +14,7 @@ from apis.dropbox_api import (
     download_file,
     download_if_exists,
     upload_file,
-    move_file,
-    debug_walk_2026
+    move_file
 )
 from app.pdf_extractor import extract_schedule_data
 from app.schedule_generator import (
@@ -84,7 +84,6 @@ def main(config):
     os.makedirs(local_processed_folder, exist_ok=True)
     os.makedirs(generated_docs_folder, exist_ok=True)
 
-    debug_walk_2026()
     pdf_files = list_pdfs(input_folder)
 
     logger.info("Found %s PDF files in Dropbox input folder.", len(pdf_files))
