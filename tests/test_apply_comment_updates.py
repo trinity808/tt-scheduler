@@ -23,6 +23,8 @@ from app.apply_comment_updates import (
     apply_comment_updates,
 )
 from tests.fakes import FakeWorksheet
+from app.comment_parser import ServiceChange
+from app.service_lookup import build_lookup
 
 
 # Comments is column D with these headers, so row 2's Comments cell
@@ -75,18 +77,20 @@ def test_rerun_with_no_changes_writes_nothing():
     assert ws.writes == []
 
 
-def test_price_and_services_are_not_applied():
-    """Scope guard for Parts 1 and 2. Replace when Part 3 starts applying price and services."""
-    headers = ["Case ID", "Provider", "Psychometrist", "Price", "Comments"]
+def test_test_changes_are_not_applied():
+    """Scope guard: test changes aren't applied to the sheet yet. Replace once they are."""
+    headers = ["Case ID", "Provider", "Psychometrist", "Services Requested", "Price", "Comments"]
     ws = FakeWorksheet([
         headers,
-        ["15419897", "", "", "484.00",
-         "Provider: Dr. Shelton\n+Service: 96130 - Autism testing - $92\nPrice: $576"],
+        ["15419897", "", "", "1. 96101-WISC-V - Wechsler", "484.00",
+         "Provider: Dr. Shelton\nAdd: cars\nChange: wisc to wais"],
     ])
     apply_comment_updates(ws)
+    assert ws.value(2, "Provider") == "Dr. Shelton"
+    assert ws.value(2, "Services Requested") == "1. 96101-WISC-V - Wechsler"
     assert ws.value(2, "Price") == "484.00"
-    price_col = headers.index("Price") + 1
-    assert all(col != price_col for _, col, _ in ws.writes)
+    provider_col = headers.index("Provider") + 1
+    assert all(col == provider_col for _, col, _ in ws.writes)
 
 
 def test_columns_found_by_name_not_position():
@@ -125,7 +129,7 @@ def test_row_without_case_id_is_skipped_entirely(case_id):
 def test_template_in_caseless_row_is_left_alone():
     ws = make_sheet(
         ["15419897", "", "", "Provider: Dr. Shelton"],
-        ["", "", "", "Provider:\nPsychometrist:\n+Service:\nPrice:"],
+        ["", "", "", "Provider:\nPsychometrist:\nAdd:\nChange:"],
     )
     results = apply_comment_updates(ws)
     assert [r["case_id"] for r in results] == ["15419897"]
@@ -140,7 +144,7 @@ def test_row_with_empty_comment_is_skipped():
 
 
 def test_blank_template_on_a_case_changes_nothing():
-    ws = make_sheet(["15419897", "Dr. Shelton", "", "Provider:\nPsychometrist:\n+Service:\nPrice:"])
+    ws = make_sheet(["15419897", "Dr. Shelton", "", "Provider:\nPsychometrist:\nAdd:\nChange:"])
     results = apply_comment_updates(ws)
     assert results[0]["fields"] == {}
     assert ws.writes == []
@@ -190,7 +194,7 @@ def test_only_rows_with_problems_are_flagged():
 
 def test_crammed_line_does_not_overwrite_provider():
     ws = make_sheet(
-        ["15419897", "Dr. Shelton", "", "Provider: Dr. Doe +Service: 96130 - Autism testing - $92"],
+        ["15419897", "Dr. Shelton", "", "Provider: Dr. Doe Add: cars"],
     )
     apply_comment_updates(ws)
     assert ws.value(2, "Provider") == "Dr. Shelton"
@@ -201,8 +205,95 @@ def test_crammed_line_does_not_overwrite_provider():
 def test_correct_line_applies_alongside_skipped_crammed_line():
     ws = make_sheet(
         ["15419897", "Dr. Smith", "",
-         "Provider: Dr. Doe +Service: 96130 - Autism testing - $92\nProvider: Dr. Shelton"],
+         "Provider: Dr. Doe Add: cars\nProvider: Dr. Shelton"],
     )
     apply_comment_updates(ws)
     assert ws.value(2, "Provider") == "Dr. Shelton"
     assert "skipped: more than one field" in ws.notes["D2"]
+
+# --- Test changes resolved through the Services lookup --------------
+
+LOOKUP = build_lookup([
+    ["Code", "Aliases"],
+    ["96101-WISC-V", "WISC"],
+    ["96101-WIAT-III", "WIAT"],
+    ["96101-WAIS-IV", "WAIS"],
+    ["96130-CARS-2", "CARS"],
+])
+
+WISC = "96101-WISC-V"
+WIAT = "96101-WIAT-III"
+WAIS = "96101-WAIS-IV"
+CARS = "96130-CARS-2"
+
+
+def test_add_is_resolved_with_a_lookup():
+    ws = make_sheet(["15419897", "", "", "Add: cars"])
+    results = apply_comment_updates(ws, LOOKUP)
+    assert results[0]["parsed"].service_changes == [ServiceChange("add", CARS)]
+    assert "D2" not in ws.notes
+
+
+def test_change_is_resolved_with_a_lookup():
+    ws = make_sheet(["15419897", "", "", "Change: wisc to wais"])
+    results = apply_comment_updates(ws, LOOKUP)
+    assert results[0]["parsed"].service_changes == [
+        ServiceChange("change", WAIS, replaces=WISC)
+    ]
+    assert "D2" not in ws.notes
+
+
+def test_unknown_test_is_flagged_on_the_comments_cell_with_a_suggestion():
+    ws = make_sheet(["15419897", "", "", "Add: wisk"])
+    apply_comment_updates(ws, LOOKUP)
+    assert ws.formats["D2"]["backgroundColor"] == COMMENT_ISSUE_COLOR
+    assert "unknown test 'wisk', did you mean WISC?" in ws.notes["D2"]
+
+
+def test_valid_and_invalid_items_in_one_line_are_handled_separately():
+    ws = make_sheet(["15419897", "", "", "Add: wiat, wait"])
+    results = apply_comment_updates(ws, LOOKUP)
+    assert results[0]["parsed"].service_changes == [ServiceChange("add", WIAT)]
+    assert "unknown test 'wait'" in ws.notes["D2"]
+
+
+def test_names_and_test_changes_in_one_comment():
+    ws = make_sheet(["15419897", "", "", "Provider: Dr. Shelton\nAdd: cars"])
+    results = apply_comment_updates(ws, LOOKUP)
+    assert ws.value(2, "Provider") == "Dr. Shelton"
+    assert results[0]["parsed"].service_changes == [ServiceChange("add", CARS)]
+
+
+def test_without_a_lookup_test_lines_are_flagged_but_names_still_apply():
+    ws = make_sheet(["15419897", "", "", "Provider: Dr. Shelton\nAdd: wisc"])
+    results = apply_comment_updates(ws)
+    assert ws.value(2, "Provider") == "Dr. Shelton"
+    assert results[0]["parsed"].service_changes == []
+    assert "services list not loaded" in ws.notes["D2"]
+
+
+def test_flag_clears_once_an_unknown_test_is_corrected():
+    ws = make_sheet(["15419897", "", "", "Add: wisk"])
+    apply_comment_updates(ws, LOOKUP)
+    assert "D2" in ws.notes
+
+    ws.rows[1][3] = "Add: wisc"  # OA fixes the typo
+    apply_comment_updates(ws, LOOKUP)
+    assert "D2" not in ws.notes
+    assert ws.formats["D2"]["backgroundColor"] == CLEAR_COLOR
+
+
+def test_resolved_test_changes_are_not_applied_to_the_sheet():
+    """Scope guard: test changes are resolved but not applied yet. Replace once they are."""
+    headers = ["Case ID", "Provider", "Psychometrist", "Services Requested", "Price", "Comments"]
+    ws = FakeWorksheet([
+        headers,
+        ["15419897", "", "", "1. 96101-WISC-V - Wechsler", "484.00",
+         "Provider: Dr. Shelton\nAdd: cars\nChange: wisc to wais"],
+    ])
+    apply_comment_updates(ws, LOOKUP)
+    assert ws.value(2, "Provider") == "Dr. Shelton"
+    assert ws.value(2, "Services Requested") == "1. 96101-WISC-V - Wechsler"
+    assert ws.value(2, "Price") == "484.00"
+    provider_col = headers.index("Provider") + 1
+    assert all(col == provider_col for _, col, _ in ws.writes)

@@ -22,6 +22,7 @@ here. That's what the occasional live check is for.
 Not collected by pytest, since the filename doesn't start with test_.
 """
 
+from gspread.exceptions import WorksheetNotFound
 from gspread.utils import a1_to_rowcol
 
 
@@ -40,7 +41,7 @@ class FakeWorksheet:
         rows = [list(row) for row in self.rows]
         while rows and not any(cell.strip() for cell in rows[-1]):
             rows.pop()
-        width = max(len(row) for row in rows)
+        width = max((len(row) for row in rows), default=0)
         return [row + [""] * (width - len(row)) for row in rows]
 
     def row_values(self, row_number):
@@ -72,6 +73,13 @@ class FakeWorksheet:
     def add_rows(self, n):
         self.row_count += n
         self.rows_added += n
+        
+    def delete_rows(self, start_index, end_index=None):
+        # Like real Sheets: the rows below shift up, and the sheet
+        # itself gets that many rows shorter.
+        end_index = end_index or start_index
+        del self.rows[start_index - 1:end_index]
+        self.row_count -= end_index - start_index + 1
 
     def format(self, cell_range, fmt):
         self.formats[cell_range] = fmt
@@ -82,6 +90,9 @@ class FakeWorksheet:
     def clear_note(self, cell):
         self.notes.pop(cell, None)
 
+    def get_note(self, cell):
+        return self.notes.get(cell, "")
+
     # --- test helper ---
 
     def value(self, row_number, header):
@@ -89,3 +100,18 @@ class FakeWorksheet:
         row = self.rows[row_number - 1]
         idx = self.rows[0].index(header)
         return row[idx] if idx < len(row) else ""
+
+class FakeSpreadsheet:
+    """
+    Stands in for a gspread Spreadsheet: a set of named tabs, looked up
+    with worksheet(name). Raises WorksheetNotFound for a missing tab,
+    like the real one.
+    """
+
+    def __init__(self, tabs):
+        self.tabs = dict(tabs)  # tab name -> FakeWorksheet
+
+    def worksheet(self, name):
+        if name not in self.tabs:
+            raise WorksheetNotFound(name)
+        return self.tabs[name]
