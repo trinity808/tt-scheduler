@@ -153,3 +153,28 @@ def move_file(from_path, to_path):
     except Exception as e:
         print(f"Failed to move Dropbox file: {e}")
         raise
+
+def list_folder_entries(folder_path, recursive=False):
+    """
+    Return all entries inside a Dropbox folder.
+
+    Handles Dropbox pagination.
+    """
+
+    dbx = get_dropbox_client()
+
+    result = dbx.files_list_folder(
+        folder_path,
+        recursive=recursive,
+    )
+
+    entries = list(result.entries)
+
+    while result.has_more:
+        result = dbx.files_list_folder_continue(
+            result.cursor
+        )
+
+        entries.extend(result.entries)
+
+    return entries
