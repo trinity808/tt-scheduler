@@ -218,6 +218,7 @@ def add_or_update_case(worksheet, extracted_data, metadata=None):
 
 if __name__ == "__main__":
     from app.sheet_client import get_client
+    from app.sheets_metadata_client import SheetsMetadataClient
 
     pdf_path = input("Path to a test PDF (e.g. testing pdfs/Test1-may4_2026.pdf): ").strip()
     extracted = extract_schedule_data(pdf_path)
@@ -234,7 +235,14 @@ if __name__ == "__main__":
 
     confirm = input("\nAdd or update this case in the Ongoing tab? (y/n): ").strip().lower()
     if confirm == "y":
-        action, row_number = add_or_update_case(ongoing, extracted)
+        try:
+            action, row_number = add_or_update_case(
+                ongoing, extracted, metadata=SheetsMetadataClient(ongoing)
+            )
+        except MetadataWriteError as error:
+            print(f"\nThe row was written, but: {error}")
+            print("Running it again is safe: it will update the row and try again.")
+            raise SystemExit(1)
         if action == "added":
             print(f"Added at row {row_number}.")
         else:
