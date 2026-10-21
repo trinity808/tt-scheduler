@@ -2,7 +2,11 @@
 
 Automated Python scheduler for Trinity Tree PDF appointment packets. The app reads incoming PDFs from Dropbox, extracts appointment and claimant details, generates local report DOCX files from Word templates, updates the correct daily schedule DOCX, uploads the schedule back to Dropbox, and moves processed PDFs out of the incoming folder.
 
+The project also has a newer second part: tracking each case in a Google Sheet. It reads the notes that Trinity Tree's office assistant (OA) writes in the sheet's Comments column, keeps the provider, psychometrist, and test information up to date, and flags anything it can't understand directly on the sheet. The sheet runs alongside the DOCX pipeline and does not replace it. The two are not connected yet: `main.py` does not write to the sheet. See [Tracking Sheet](#tracking-sheet).
+
 ## What It Does
+
+### DOCX pipeline (`main.py`)
 
 - Connects to Dropbox using long-lived refresh-token authentication.
 - Finds PDF files in a configured Dropbox input folder.
@@ -13,8 +17,8 @@ Automated Python scheduler for Trinity Tree PDF appointment packets. The app rea
   - patient name
   - date of birth and age
   - claimant phone number
-  - assigned doctor
-  - examiner initials
+  - assigned doctor (from Trinity Tree's letterhead, the same on every packet, not a per-case provider)
+  - examiner initials (the SSA's own claims examiner, not Trinity Tree's psychometrist)
   - service date, time, code, description, and amount
   - allegations
 - Selects the adult or child report template based on the configured age cutoff.
@@ -26,149 +30,212 @@ Automated Python scheduler for Trinity Tree PDF appointment packets. The app rea
 - Writes rotating logs and can send email alerts on failures.
 - Uses a simple lock file so overlapping runs do not process the same files at once.
 
+### Google Sheet tracking
+
+- Adds each extracted case as a row on the sheet's `Ongoing` tab. A repeated PDF updates that row in place and flags it as a duplicate.
+- Reads OA's notes in the Comments column (`Provider:`, `Psychometrist:`, `Add:`, `Change:`) and fills in the Provider and Psychometrist columns.
+- Resolves short test names such as `wms` or `wisc` into full service codes through a `Services` tab. Unknown or ambiguous names are flagged. Test changes are recognized and reported, but not yet written to the sheet.
+- Flags problems directly on the sheet, with a note and, for cases, a colored cell, and prints a plain-language report after each run.
+- Moves a finished case from the `Ongoing` tab to the `Finished` tab.
+
 ## Project Structure
 
 ```text
 .
 ├── apis/
-│   └── dropbox_api.py          # Dropbox auth and file operations
+│   ├── dropbox_api.py            # Dropbox auth and file operations
+│   └── dropbox_metadata.py       # When Dropbox received a file (server time, UTC)
 ├── app/
-│   ├── config_loader.py        # Loads config/settings.json
-│   ├── file_utils.py           # Reserved helper module
-│   ├── health_monitor.py       # Logging, startup checks, email alerts
-│   ├── pdf_extractor.py        # PDF parsing and data extraction
-│   ├── schedule_generator.py   # Daily schedule DOCX creation/update
-│   ├── state_manager.py        # Optional processed-file ID tracking helpers
-│   └── template_filler.py      # Report template placeholder replacement
+│   ├── apply_comment_updates.py  # The sweep: applies OA's comments to the Ongoing tab (run_sweep)
+│   ├── comment_parser.py         # Parses the Comments column format
+│   ├── config_loader.py          # Loads config/settings.json
+│   ├── file_utils.py             # Unused, kept from the original project
+│   ├── health_monitor.py         # Logging, startup checks, email alerts
+│   ├── ongoing_row_mapper.py     # Maps an extracted PDF to an Ongoing row, adds or updates it
+│   ├── pdf_extractor.py          # PDF parsing and data extraction
+│   ├── schedule_generator.py     # Daily schedule DOCX creation/update
+│   ├── service_format.py         # The shared pattern for a service code
+│   ├── service_lookup.py         # Turns typed test names into service codes
+│   ├── services_tab.py           # Loads the Services tab and flags problems on it
+│   ├── sheet_case_mover.py       # Moves a case from Ongoing to Finished
+│   ├── sheet_client.py           # Google Sheets connection and cell helpers
+│   ├── state_manager.py          # Unused, kept from the original project
+│   ├── sweep_report.py           # Plain-language console report for a sweep
+│   └── template_filler.py        # Report template placeholder replacement
 ├── config/
-│   └── settings.json           # Runtime folders and scheduler settings
+│   └── settings.json             # Runtime folders and scheduler settings
 ├── docs/
 │   └── trinity_scheduler_process_guide.pdf
-├── templates/
-│   ├── adult_report_template.docx
-│   └── child_report_template.docx
-├── testing pdfs/               # Sample PDFs for manual testing
-├── .env.example                # Environment variable template
-├── get_refresh_token.py        # Dropbox refresh-token setup helper
-├── main.py                     # Main scheduler entry point
-├── requirements.txt            # Python dependencies
-└── run_scheduler.sh            # macOS/local shell runner
+├── scripts/
+│   └── check_sheet_connection.py # Live check against your own sandbox sheet
+├── templates/                    # Local only, not in the repository (see below)
+├── testing pdfs/                 # Local only, not in the repository (see below)
+├── tests/                        # pytest suite
+├── .env.example                  # Environment variable template
+├── get_refresh_token.py          # Dropbox refresh-token setup helper
+├── main.py                       # DOCX pipeline entry point
+├── requirements.txt              # Python dependencies
+├── requirements-dev.txt          # requirements.txt plus pytest
+├── run_scheduler.sh              # macOS/local shell runner
+└── scheduler local enabler steps.docx   # macOS scheduling guide
 ```
 
-Runtime folders such as `data/`, `logs/`, `venv/`, `__pycache__/`, and `.env` should stay out of GitHub.
+Runtime folders such as `data/`, `logs/`, `reports/`, `.venv/`, `__pycache__/`, and `.env` stay out of GitHub.
+
+`templates/` and `testing pdfs/` are deliberately not in the repository either, since they may contain private claimant data. Ask a teammate for copies and place them at the project root. `main.py` needs the templates to run, and `tests/test_local_pipeline.py` skips itself when either folder is missing.
 
 ## Requirements
 
-- Python 3.10 or newer
-- Dropbox app credentials
-- A Dropbox refresh token with access to the configured folders
+- Python 3.10 or newer (developed and tested on 3.11)
+- Windows or macOS. Scheduling is covered for both below. The macOS runner (`run_scheduler.sh`) has not been tested by the current team.
+- Dropbox app credentials and a refresh token with access to the folders in use
+- For the Google Sheet tracking only: a Google Cloud service account with a JSON key file, and a Google Sheet shared with it
 - Microsoft Word, LibreOffice, or another DOCX-compatible editor for viewing generated documents
-- macOS if using the included `run_scheduler.sh` and launchd-style local scheduling
+- The `templates/` folder (adult and child report templates), which is not in the repository. Ask a teammate for a copy. Or get it from the legacy repo.
 
-Python packages:
+Python packages are listed in `requirements.txt`. `requirements-dev.txt` adds `pytest` for running the tests.
 
-```text
-python-dotenv
-dropbox
-pdfplumber
-python-docx
-python-dateutil
-```
+While developing, use your own Dropbox app and your own copy of the sheet. Do not point a development setup at Trinity Tree's production Dropbox or sheet.
 
 ## Setup
 
-Clone or download the project, then create and activate a virtual environment:
+Run everything from the project root. Clone the repository, then create and activate a virtual environment.
+
+**Windows (PowerShell):**
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+If PowerShell refuses to run the activation script, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once and try again.
+
+**Windows (Git Bash):**
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+python -m venv .venv
+source .venv/Scripts/activate
+```
+
+**macOS / Linux:**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+`.venv/` is already ignored by git. The macOS runner `run_scheduler.sh` activates a folder named `venv`, so if you use that script, either create `venv` instead or edit the script.
+
+Install the dependencies. Developers should use the second line, which also installs `pytest`:
+
+```bash
 pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
-Create your local environment file:
+Create your local environment file from the template, then fill it in:
 
 ```bash
-cp .env.example .env
+cp .env.example .env          # Git Bash or macOS
+copy .env.example .env        # PowerShell
 ```
 
-Fill in `.env`:
+`.env.example` lists every variable with comments. In short:
 
-```env
-DROPBOX_APP_KEY=
-DROPBOX_APP_SECRET=
-DROPBOX_REFRESH_TOKEN=
+| Variable | What it is | Needed for |
+|---|---|---|
+| `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN` | Credentials from your Dropbox app (see Dropbox App Setup) | Anything that touches Dropbox |
+| `DROPBOX_INPUT_FOLDER`, `DROPBOX_PROCESSED_PDF_FOLDER`, `DROPBOX_SCHEDULE_FOLDER` | The Dropbox folders the DOCX pipeline reads from and writes to | `main.py` |
+| `GOOGLE_SHEETS_ID` | The ID in your sheet's URL, between `/d/` and `/edit` | The tracking sheet |
+| `GOOGLE_SERVICE_ACCOUNT_FILE` | Path to the service account key, `config/service_account.json` by default | The tracking sheet |
+| `SMTP_*`, `ALERT_TO_EMAIL` | Optional failure emails | Only when `email_notifications_enabled` is `true` in `config/settings.json` |
 
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USE_TLS=true
-SMTP_USERNAME=
-SMTP_PASSWORD=
-SMTP_FROM_EMAIL=
-ALERT_TO_EMAIL=
+The SMTP settings use a plain username and password, which works with providers such as Gmail (with an app password). It does not work with Microsoft 365 mailboxes, which no longer accept that login.
+
+### Dropbox folder paths
+
+The three folder variables are personal to your Dropbox app, which is why they live in `.env` and not in `config/settings.json`. What they look like depends on the app's access type:
+
+- **App folder access:** short paths, relative to your app's folder. For example `/incoming_pdfs`.
+- **Full Dropbox access:** full paths from the root of the account. For example `/Apps/<your app name>/incoming_pdfs`.
+
+If one is missing, the startup check stops the run with a message naming it.
+
+### Google Sheets setup
+
+Only needed for the tracking sheet.
+
+1. Create a Google Cloud project and enable the **Google Sheets API** and the **Google Drive API**.
+2. Create a service account in that project and download a JSON key. Save it as `config/service_account.json`. It is already in `.gitignore`. Never commit it.
+3. Create a spreadsheet with tabs named exactly `Ongoing`, `Finished`, and `Services`, with the header rows described under [Tracking Sheet](#tracking-sheet).
+4. Share the spreadsheet with the service account's email address (it ends in `iam.gserviceaccount.com`), as Editor. A service account has no access to anything, even in its own project, until the sheet is shared with it.
+5. Copy the sheet's ID from its URL into `GOOGLE_SHEETS_ID` in `.env`.
+6. Check the connection:
+
+```bash
+python scripts/check_sheet_connection.py
 ```
 
-Email settings are only required when `email_notifications_enabled` is set to `true` in `config/settings.json`.
+It prints the tabs it found and each tab's headers.
 
 ## Dropbox App Setup
 
-1. Create a Dropbox app in the Dropbox App Console.
-2. Copy the app key and app secret into `.env`.
-3. Make sure the app has permission to read, write, upload, and move files in the Dropbox folders used by this scheduler.
-4. Generate a refresh token:
+1. Create a Dropbox app in the [Dropbox App Console](https://www.dropbox.com/developers/apps/create) with **Scoped access**.
+2. Choose the access type:
+   - **App folder** is the simplest for a personal development setup. Everything lives under `Apps/<your app name>/` in your Dropbox.
+   - **Full Dropbox** is needed to see folders outside the app folder, such as a folder shared in from another account. The access type cannot be changed after the app is created. To switch, delete the app and create a new one.
+3. On the Permissions tab, enable `files.metadata.read`, `files.content.write`, and `files.content.read`, then submit.
+4. Copy the app key and app secret from the Settings tab into `.env`.
+5. Generate a refresh token:
 
 ```bash
-source venv/bin/activate
 python get_refresh_token.py
 ```
 
-5. Open the authorization URL printed by the script.
-6. Approve access in Dropbox.
+6. Open the authorization URL the script prints and approve access in Dropbox.
 7. Paste the authorization code back into the terminal.
 8. Copy the printed `DROPBOX_REFRESH_TOKEN=...` value into `.env`.
+9. In Dropbox, create the three folders the pipeline uses (for example `incoming_pdfs`, `processed_pdfs`, and `schedules`), inside `Apps/<your app name>/` for an app-folder app. Set the three folder variables in `.env` to match, following the path rules above.
 
 ## Configuration
 
-Main runtime settings live in `config/settings.json`.
+Settings are split in two, by one rule: anything that is the same for everyone lives in `config/settings.json`, which is committed. Anything that differs between machines or people lives in `.env`, which is not. That's why Dropbox folder paths, credentials, and the sheet ID are in `.env` (see [Setup](#setup)).
+
+`config/settings.json` holds the shared runtime settings:
 
 ```json
 {
   "base_folder": "data",
-  "dropbox_input_folder": "/incoming_pdfs",
-  "dropbox_processed_pdf_folder": "/processed_pdfs",
-  "dropbox_schedule_folder": "/schedules",
   "adult_age_cutoff": 18,
   "max_files_per_run": 200,
   "adult_template_path": "templates/adult_report_template.docx",
   "child_template_path": "templates/child_report_template.docx",
-  "generated_docs_folder": "/Users/anand/Desktop/reports",
+  "generated_docs_folder": "reports",
   "health_check": {
     "log_folder": "logs",
-    "email_notifications_enabled": true,
+    "email_notifications_enabled": false,
     "email_subject_prefix": "[Trinity Scheduler]"
   }
 }
 ```
 
-Important settings:
+Settings:
 
 - `base_folder`: local working folder for downloaded PDFs, local schedules, and processed PDFs.
-- `dropbox_input_folder`: Dropbox folder where new PDF packets are placed.
-- `dropbox_processed_pdf_folder`: Dropbox folder where finished PDFs are moved.
-- `dropbox_schedule_folder`: Dropbox folder where generated schedule DOCX files are uploaded.
-- `adult_age_cutoff`: age used to choose adult vs child report template.
+- `adult_age_cutoff`: age used to choose the adult or child report template.
 - `max_files_per_run`: maximum number of PDFs to process in one scheduler run.
 - `adult_template_path`: path to the adult DOCX template.
 - `child_template_path`: path to the child DOCX template.
 - `generated_docs_folder`: local folder for filled report documents.
 - `health_check.log_folder`: folder for scheduler logs.
-- `health_check.email_notifications_enabled`: enables or disables alert emails.
-- `health_check.email_subject_prefix`: prefix added to error email subjects.
+- `health_check.email_notifications_enabled`: turns failure emails on or off. Off by default.
+- `health_check.email_subject_prefix`: prefix added to failure email subjects.
 
-For portability, change absolute paths such as `/Users/anand/Desktop/reports` to a path that exists on the machine running the scheduler.
+Relative paths resolve from the project root, so run everything from there.
 
 ## Template Placeholders
 
-The report templates are DOCX files in `templates/`. The scheduler replaces these placeholders wherever they appear in paragraphs, tables, headers, or footers:
+The report templates are DOCX files in `templates/`, which is not in the repository (see [Project Structure](#project-structure)). The scheduler replaces these placeholders wherever they appear in paragraphs, tables, headers, or footers:
 
 ```text
 {{FULL_NAME}}
@@ -190,18 +257,21 @@ The report templates are DOCX files in `templates/`. The scheduler replaces thes
 
 ## Running Manually
 
-Activate the virtual environment and run:
+With the virtual environment active, from the project root:
 
 ```bash
-source venv/bin/activate
 python main.py
 ```
 
-On startup, the scheduler checks required config values, template paths, generated document folder access, and email alert configuration. If a required item is missing, the run fails before processing PDFs.
+This runs the DOCX pipeline only. It does not touch the Google Sheet.
 
-## Running With the Shell Script
+On startup, the scheduler checks that the required settings and the three Dropbox folder variables in `.env` are present, that the template files exist, and that the generated documents folder can be created. If anything is missing, the run stops with a message naming it, before any PDF is processed.
 
-`run_scheduler.sh` is useful for local scheduled runs:
+A `scheduler.lock` file stops two runs from overlapping. It is removed when a run ends. If a run was killed hard and left the file behind, the next run exits saying another run is active. Delete the file once you're sure nothing is running.
+
+## Running With the Shell Script (macOS)
+
+`run_scheduler.sh` is a runner for local scheduled runs on macOS. The current team has not tested it. Anyone who works on a Mac is welcome to correct this section and the one below.
 
 ```bash
 chmod +x run_scheduler.sh
@@ -214,11 +284,11 @@ Before using it on another machine, edit the `cd` line so it points to that mach
 cd "/path/to/trinity-dropbox-scheduler"
 ```
 
-The script activates `venv`, runs `main.py`, appends normal output to `logs/scheduler.log`, and appends errors to `logs/scheduler_error.log`.
+The script activates a virtual environment folder named `venv` (not `.venv`, which the Setup section uses), runs `main.py`, appends normal output to `logs/scheduler.log`, and appends errors to `logs/scheduler_error.log`. Create `venv`, or edit the script to match.
 
 ## Scheduling on macOS
 
-This project includes a local shell runner and a Word guide named `scheduler local enabler steps.docx`. A typical macOS launchd setup looks like this:
+This section has not been tested by the current team. The repository includes a Word guide, `scheduler local enabler steps.docx`, for this setup. A typical launchd setup looks like this:
 
 1. Make `run_scheduler.sh` executable.
 2. Create a launch agent plist in `~/Library/LaunchAgents/`.
@@ -235,43 +305,54 @@ launchctl unload ~/Library/LaunchAgents/com.trinity.scheduler.plist
 launchctl list | grep trinity
 ```
 
+## Scheduling on Windows
+
+Windows Task Scheduler can run the DOCX pipeline (`main.py`) on a repeating schedule. This schedules the pipeline only. The sheet tracking is not scheduled yet.
+
+1. Open Task Scheduler and choose **Create Task**. Use this, not the Basic Task wizard, which hides settings you need.
+2. **General:** give it a name. "Run only when user is logged on" is the option this has been tested with.
+3. **Triggers:** New, then begin the task **On a schedule**, Daily. Tick **Repeat task every** and pick an interval, for a duration of **Indefinitely**. Testing used 5 minutes. The right interval for real use is still to be decided.
+4. **Actions:** New, **Start a program**, and fill in the three fields separately:
+   - **Program/script:** the full path to the virtual environment's Python, for example `C:\Codes\tt-scheduler\.venv\Scripts\python.exe`
+   - **Add arguments:** `main.py`
+   - **Start in:** the project root, for example `C:\Codes\tt-scheduler`
+5. **Conditions:** on a laptop, untick **Start the task only if the computer is on AC power**, otherwise the task quietly doesn't run on battery. This has not been tested.
+6. Save, then right-click the task and choose **Run** to try it now, without waiting for the trigger.
+
+Nothing appears on screen when it runs, even when it works. Check `logs/scheduler.log` for a fresh entry, and `logs/scheduler_error.log` for errors. For the exit code of the last run, open the task's **History** tab. If it's empty, click **Enable All Tasks History** in the right-hand pane first.
+
+Mistakes made while setting this up, and what each looks like:
+
+- **The program and its arguments in one field.** The task fails to start at all. They belong in two separate fields.
+- **The wrong environment folder name,** such as `venv` where it's `.venv`. The task fails to start. Open the action and check the path.
+- **A missing "Start in" folder.** The program starts from a system folder, and every relative path (settings, templates, logs) breaks.
+- **Dropbox folder paths in `.env` that don't match the app's access type.** The run starts but fails at its first Dropbox call with a `not_found` error in `logs/scheduler_error.log`. See [Dropbox folder paths](#dropbox-folder-paths).
+
+Not tested: "Run whether user is logged on or not", running while the computer is asleep, and the wake-the-computer option.
+
 ## Processing Flow
 
 1. `main.py` loads `config/settings.json`.
 2. Logging is configured by `app/health_monitor.py`.
 3. A `scheduler.lock` file is created to prevent overlapping runs.
-4. Dropbox PDFs are listed from `dropbox_input_folder`.
+4. Dropbox PDFs are listed from the folder in `DROPBOX_INPUT_FOLDER`.
 5. Each PDF is downloaded into `data/incoming_pdfs/`.
 6. `app/pdf_extractor.py` extracts scheduling data.
 7. `app/template_filler.py` fills the adult or child report template.
-8. Existing same-day schedule DOCX is downloaded from Dropbox if present.
+8. The existing same-day schedule DOCX is downloaded from Dropbox if present.
 9. `app/schedule_generator.py` creates or updates the local schedule DOCX.
-10. The updated schedule is uploaded to `dropbox_schedule_folder`.
-11. The original PDF is moved to `dropbox_processed_pdf_folder`.
+10. The updated schedule is uploaded to the folder in `DROPBOX_SCHEDULE_FOLDER`.
+11. The original PDF is moved to the folder in `DROPBOX_PROCESSED_PDF_FOLDER`.
 12. Successes and failures are written to logs.
 13. The lock file is removed when the run exits.
 
+This flow does not write to the Google Sheet. See [Tracking Sheet](#tracking-sheet) for how cases get onto it.
+
 ## Output Files
 
-Generated report documents are saved to `generated_docs_folder`. The default current config writes them to:
+Generated report documents are saved to `generated_docs_folder` from `config/settings.json`, which is `reports/` by default.
 
-```text
-/Users/anand/Desktop/reports
-```
-
-Schedule files are created locally under:
-
-```text
-data/schedules/
-```
-
-and uploaded to the configured Dropbox schedule folder.
-
-Processed PDFs are moved in Dropbox to:
-
-```text
-/processed_pdfs
-```
+Schedule files are created locally under `data/schedules/` and uploaded to the Dropbox schedule folder. Processed PDFs are moved in Dropbox to the processed folder.
 
 ## Logs and Alerts
 
@@ -280,17 +361,211 @@ Logs are written to:
 ```text
 logs/scheduler.log
 logs/scheduler_error.log
-logs/launchd.log
-logs/launchd_error.log
 ```
 
-The Python logger uses rotating log files with a 2 MB limit and 5 backups.
+On macOS, the launchd setup also writes `logs/launchd.log` and `logs/launchd_error.log`.
 
-When email alerts are enabled, failures can send SMTP email using the values in `.env`. For Gmail, use an app password rather than your normal account password.
+The Python logger writes the first two itself, in rotating files with a 2 MB limit and 5 backups. Each line looks like this:
 
-## Manual Testing
+```text
+2026-09-22 17:25:42,003 | INFO | trinity_scheduler | Run complete.
+```
 
-Sample PDFs are stored in `testing pdfs/`. To test end to end:
+Only logger output reaches these files. Some low-level messages in `apis/dropbox_api.py`, such as the upload and move confirmations, are plain `print` calls. They appear on the console but not in the log, and the run's own log lines already record the same steps. The macOS shell script also appends the console output to the same files, which has not been tested.
+
+When email alerts are enabled in `config/settings.json`, a failed PDF or a fatal run failure sends an email using the SMTP values in `.env`. They are off by default. The SMTP settings use a plain username and password, so a Gmail account needs an app password. Microsoft 365 mailboxes no longer accept that kind of login and would need a different approach.
+
+## Tracking Sheet
+
+> **Status:** the Google Sheet tracking is in development. It runs alongside the DOCX pipeline, nothing in it is scheduled yet, and the layout below is a working draft that will change as the pieces come together. It will be revisited after it has run in production.
+<!-- Revisit this whole section once the sheet is proven in production and OA signs off. -->
+
+The sheet has three tabs. Tab names must match exactly, and every tab has its headers in row 1.
+
+### Tabs and columns
+
+**Ongoing**: one row per open case.
+
+```text
+Case ID | Patient Name | Phone | DOB | Adult | Child | Date & Time | Services Requested | Allegations | Psychometrist | Provider | Price | Comments
+```
+
+**Finished**: cases that have been completed.
+
+```text
+Case ID | Patient Name | Phone | Psychometrist | Provider | Price | Payment Status | Date Completed
+```
+
+**Services**: the list of tests, used to turn short names into full codes.
+
+```text
+Code | Aliases | Name | Price
+```
+
+The code finds columns by their header name, not their position, so columns can be reordered or added without changing anything. Renaming a header the code uses breaks that feature. These are the ones it depends on:
+
+| Tab | Headers the code needs |
+|---|---|
+| Ongoing | `Case ID` everywhere. `Provider`, `Psychometrist`, and `Comments` for the sweep. The other headers are filled from the PDF if present and left blank if not. |
+| Finished | `Case ID`. Any header that also exists in Ongoing is copied across. `Payment Status` and `Date Completed` are filled only by whatever moves the case, and are blank otherwise. |
+| Services | `Code` and `Aliases`. `Name` and `Price` are for people and are not read. |
+
+These columns are a draft and may change. If you rename or remove one, search the repository for the header's name to find what uses it, for example `git grep -n "Payment Status"`.
+
+Who fills what on the Ongoing tab: everything up to `Allegations`, plus `Price`, comes from the PDF. `Psychometrist` and `Provider` are filled by the sweep from the Comments column. `Comments` is written by OA. `Price` is the total printed on the PDF. Final billed amounts are set separately on the billing request forms and are not tracked here.
+
+### Adding a case
+
+```bash
+python -m app.ongoing_row_mapper
+```
+
+It asks for the path to a PDF on your computer, shows the row it would write, and asks for confirmation. It takes a local file path, not a Dropbox path. Nothing connects Dropbox to the sheet yet, so cases are added this way.
+
+- **A new case** goes into the first row after the last row that has a Case ID. Template text that OA has pre-filled in empty rows below the data does not push it down, and is kept. A blank row in the middle of the data is not filled.
+- **A repeated Case ID** updates that row in place instead of adding a second one. Everything taken from the PDF is refreshed, including `Price`, so a hand edit to those columns is overwritten. `Psychometrist`, `Provider`, and `Comments` are left alone. The row turns yellow with a note, so the repeat is not silent.
+
+### Comments format
+
+This part is written so it can be shared with OA on its own.
+
+OA writes notes about a case in its **Comments** cell. Put each item on its own line (Ctrl+Enter, or Cmd+Enter on a Mac, starts a new line inside a cell), or separate items with a semicolon. Capitalization doesn't matter.
+
+```text
+Provider: Dr. Doe
+Psychometrist: J. Smith
+Add: WMS, VABS
+Change: CTONI to WAIS
+```
+
+- `Provider:` and `Psychometrist:` fill the Provider and Psychometrist columns.
+- `Add:` lists tests to add, separated by commas.
+- `Change:` replaces one test with another. Name both, for example `Change: WISC to WIAT`. Several can be listed, separated by commas.
+- A line left blank is ignored, so a copy of the empty template can be filled in with only what applies:
+
+```text
+Provider:
+Psychometrist:
+Add:
+Change:
+```
+
+Tests are written by short name, such as `wms`, `WISC-V`, or `Psychiatric Exam`. Spaces, capitalization, and punctuation don't matter. A name that isn't in the Services tab, or that matches two tests, is flagged so it can be corrected.
+
+If a line can't be used, the Comments cell turns orange and gets a note saying what was wrong and what was done with that line. The problems it catches are a misspelled field name (with a suggestion), a line with no colon, an unknown test, two fields crammed onto one line, and the same field given twice. A line that can't be used is skipped, and the rest of the comment still applies. Fix the comment, and the orange clears itself the next time the sweep runs.
+
+`Price:` and `+Service:`, from an earlier draft of this format, are no longer recognized.
+
+Test changes (`Add` and `Change`) are checked, and any problems are flagged, but they are not yet written into the sheet.
+
+### Running the sweep
+
+```bash
+python -m app.apply_comment_updates
+```
+
+One run does this, in order:
+
+1. Loads the Services tab, and flags any problems with it.
+2. Reads the Comments cell of every case.
+3. Fills in `Provider` and `Psychometrist` where the comment names someone different from what is there. An unchanged value is never rewritten, and the comment is the source of truth for these two columns, so a different name typed straight into the column is replaced the next time the sweep runs.
+4. Flags any comment with a problem.
+5. Prints a plain-language report.
+
+Rows with no Case ID are skipped entirely, comment and all, so a template kept in a spare row is left alone. Running it again and again is safe. It ends with "Press Enter to close", which suits a manual run and would hang a scheduled one, so it is not scheduled yet.
+
+A sample of the report:
+
+```text
+Services tab needs attention:
+  - Row 5: 'Beery VMI' isn't a valid service code (five digits, e.g. 96101-WISC-V), so it was skipped
+  (noted on the Services tab)
+
+Case 15419897:
+  Provider: updated from Dr. Smith to Dr. Doe
+  Psychometrist: set to J. Smith
+  Test changes found (not applied to the sheet yet):
+    add 96130-CARS-2
+    change 96101-WISC-V to 96101-WAIS-IV
+
+Case 15419372:
+  NEEDS ATTENTION:
+    Add: wisk  (skipped: unknown test 'wisk', did you mean WISC?)
+
+2 comment(s) processed, 2 field(s) updated, 1 flagged for attention. 2 test change(s) found, not applied to the sheet yet.
+Flagged cases: 15419372
+```
+
+If the Services tab is missing or unusable, the sweep still runs. Provider and Psychometrist are still filled in, and `Add:` and `Change:` lines are flagged as "services list not loaded".
+
+### Moving a case to Finished
+
+```bash
+python -m app.sheet_case_mover
+```
+
+It asks for a Case ID, and optionally a Payment Status and a Date Completed. The case is written to the Finished tab, in the first row after the last case, and only then deleted from Ongoing. If the write fails, the case is still in Ongoing. Moving cases is manual for now.
+
+### The Services tab
+
+Each row is one test. A row's `Code` is the code as the authorization PDF prints it, including the edition, for example `96101-WISC-V` (five digits, then letters, digits, or hyphens). A row answers to:
+
+- its full code, `96101-WISC-V`
+- the part after the five digits, `WISC-V`, which is worked out automatically
+- anything in the `Aliases` column, separated by commas, such as `WISC`
+
+Editing the tab needs no code change. The sweep reads it fresh each run. The tab is edited by people, so a problem in one row doesn't stop the rest:
+
+- A row whose `Code` isn't a valid service code is skipped and reported. A test with no billing code can't be listed yet.
+- A name that points to more than one row is reported and not accepted until it's fixed, for example an alias that matches another test's abbreviation.
+- A missing tab, an empty tab, or a missing `Code` or `Aliases` header is reported, and the sweep carries on without test names.
+
+Problems appear in the report, and as a note on cell A1 of the Services tab. The note clears itself once the table is fixed. A note someone else has put on A1 is never overwritten, and the report says so instead.
+
+### Flags on the sheet
+
+| What you see | What it means | Does it clear itself? |
+|---|---|---|
+| A yellow row, with a note on the Case ID cell saying "Duplicate entry received" | The same case arrived again. Details from the PDF were refreshed, and Provider, Psychometrist, and Comments were left alone. | No. Clear it by hand, or it goes when the case moves to Finished. |
+| An orange Comments cell, with a note | A line in the comment couldn't be used. | Yes, once the comment is fixed and the sweep runs again. Deleting the comment text entirely leaves the flag behind, which is a known gap. |
+| A note on the top-left cell of the Services tab | A problem with the Services table. | Yes, once the table is fixed and the sweep runs again. |
+
+The sheet's own flags only ever set a background color and a note. They never change text color, so OA's blue and red markings for attended and no-show cases are left alone.
+
+To clear a duplicate flag: select the row, then Fill color, then Reset, then right-click the Case ID cell and choose Delete note. Don't use "Clear formatting", which also removes the text colors.
+
+If a case needs removing, delete its row. Clearing its cells leaves the fill and notes behind.
+
+## Testing
+
+### Automated tests
+
+Install the development dependencies, then run the suite from the project root:
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -v
+```
+
+Use `python -m pytest`, not plain `pytest`, so the project root is on the import path.
+
+The tests run in memory. They need no Dropbox or Google credentials, because the Google Sheets code takes the sheet as a parameter and the tests hand it a stand-in from `tests/fakes.py`. They cover the comment parser, the Services lookup and its tab, the sweep, adding and moving cases, the console report, the schedule sort, and the PDF pipeline.
+
+`tests/test_local_pipeline.py` runs the real extraction and report code against sample PDFs. It needs the local-only `templates/` and `testing pdfs/` folders and skips itself, with a reason, when they are missing.
+
+A stand-in only behaves the way it was written to. It cannot show how real Google Sheets behaves, which is where bugs have turned up before. Anything that talks to the real sheet should also get a live check against your own sandbox sheet.
+
+### Live checks
+
+```bash
+python scripts/check_sheet_connection.py
+```
+
+This opens the sheet set in `.env` and prints its tabs and their headers. It does not import from `app/`, so it runs directly.
+
+### Trying the DOCX pipeline by hand
+
+Sample PDFs are in `testing pdfs/` (local only). To test end to end:
 
 1. Put one sample PDF in the configured Dropbox input folder.
 2. Run `python main.py`.
@@ -299,68 +574,154 @@ Sample PDFs are stored in `testing pdfs/`. To test end to end:
 5. Confirm the local report DOCX was created in `generated_docs_folder`.
 6. Check `logs/scheduler.log` for extracted values and final counts.
 
-To test extraction only, use Python directly:
+To test extraction only, with no Dropbox involved:
 
 ```bash
-python - <<'PY'
-from app.pdf_extractor import extract_schedule_data
-
-data = extract_schedule_data("testing pdfs/Test1-may4_2026.pdf")
-for key, value in data.items():
-    print(f"{key}: {value}")
-PY
+python -c "from app.pdf_extractor import extract_schedule_data as e; [print(k, v, sep=': ') for k, v in e('testing pdfs/Test1-may4_2026.pdf').items()]"
 ```
+
+### Trying the sheet by hand
+
+Use your own sandbox sheet, never the production one.
+
+1. Add a case: `python -m app.ongoing_row_mapper`, with a sample PDF.
+2. Type a note in that case's Comments cell, for example `Provider: Dr. Doe`.
+3. Run the sweep: `python -m app.apply_comment_updates`.
+4. Check the Provider column and read the report.
+5. Make a deliberate typo in the comment, such as `Provder:`, and run the sweep again. The Comments cell should turn orange with a note that suggests the right spelling.
 
 ## Troubleshooting
 
-`DROPBOX_APP_KEY not found in .env`
+**`DROPBOX_APP_KEY not found in .env`** (or the secret, or the refresh token)
 
-Make sure `.env` exists in the project root and contains Dropbox credentials.
+Make sure `.env` exists in the project root and contains the Dropbox credentials. If only the refresh token is missing, run `python get_refresh_token.py`, approve the app, and paste the token into `.env`.
 
-`DROPBOX_REFRESH_TOKEN not found in .env`
+**`Startup health check failed: Missing .env value: DROPBOX_INPUT_FOLDER`**
 
-Run `python get_refresh_token.py`, approve the Dropbox app, and paste the generated refresh token into `.env`.
+The message names what's missing. The three Dropbox folder variables, the settings in `config/settings.json`, and the template files are all checked before any PDF is processed. A `Template file not found` message means `templates/` is missing, since it isn't in the repository.
 
-`Startup health check failed`
+**`not_found` on the first Dropbox call**
 
-Check `config/settings.json` for missing folder paths or template paths. Make sure the generated docs folder can be created.
+A Dropbox folder variable doesn't match the app's access type. App folder apps use short paths such as `/incoming_pdfs`. Full Dropbox apps need the full path, such as `/Apps/<your app name>/incoming_pdfs`. See [Dropbox folder paths](#dropbox-folder-paths).
 
-`Template not found`
+**`ModuleNotFoundError: No module named 'app'`**
 
-Confirm that `adult_template_path` and `child_template_path` point to existing DOCX files.
+Run the script as a module from the project root: `python -m app.apply_comment_updates`, not `python app/apply_comment_updates.py`. Only `scripts/check_sheet_connection.py` runs directly.
 
-No PDFs are processed
+**`Another scheduler run is already active. Exiting.`**
 
-Confirm that `dropbox_input_folder` is correct and contains files ending in `.pdf`.
+A previous run left `scheduler.lock` behind. If nothing is running, delete the file.
 
-Wrong adult or child template selected
+**The Windows scheduled task does nothing**
 
-Check that the PDF contains a readable DOB and appointment date. The app compares the claimant age on the schedule date to `adult_age_cutoff`.
+See the mistakes listed under [Scheduling on Windows](#scheduling-on-windows), and check the task's History tab.
 
-Email notifications do not send
+**No PDFs are processed**
 
-Confirm `email_notifications_enabled` is `true`, SMTP values are present in `.env`, and the SMTP account allows app-password or SMTP access.
+Confirm that `DROPBOX_INPUT_FOLDER` is correct and the folder contains files ending in `.pdf`.
 
-## Security Notes Before Publishing to GitHub
+**The wrong adult or child template is selected**
 
-Do not commit secrets or local runtime files. In particular:
+Check that the PDF contains a readable date of birth and appointment date. The app compares the claimant's age on the schedule date to `adult_age_cutoff`.
 
-- Keep `.env` out of Git.
-- Remove or ignore `.history/` if it contains old `.env` snapshots.
-- Keep `venv/`, `logs/`, `data/`, `__pycache__/`, `.DS_Store`, and generated DOCX outputs out of Git.
-- Review templates and testing PDFs before publishing if they may contain private claimant data.
-- Rotate Dropbox and SMTP credentials if they were ever committed or shared.
+**Email notifications do not send**
 
-The current `.gitignore` already excludes several runtime paths, but check the repository carefully before the first GitHub push.
+Confirm `email_notifications_enabled` is `true`, the SMTP values are in `.env`, and the account allows app-password or SMTP access. Microsoft 365 mailboxes no longer accept a plain username and password.
 
-## Maintenance Notes
+**`FileNotFoundError` for `service_account.json`**
 
-- Update `requirements.txt` whenever dependencies change.
-- Keep `run_scheduler.sh` paths in sync with the machine where the scheduler runs.
-- If the PDF format changes, update extraction logic in `app/pdf_extractor.py`.
-- If the schedule table changes, update headers and row generation in `app/schedule_generator.py`.
-- If template placeholders change, update replacements in `app/template_filler.py`.
+The key isn't where `GOOGLE_SERVICE_ACCOUNT_FILE` points. The default is `config/service_account.json`.
+
+**A Google error saying permission denied, or `SpreadsheetNotFound`**
+
+Usually the sheet isn't shared with the service account's email address, or `GOOGLE_SHEETS_ID` is wrong. An error saying an API "has not been used in project ... or it is disabled" means the Sheets API or the Drive API needs enabling in the Google Cloud project.
+
+**A `ValueError` naming a column, such as `'Comments' column not found`**
+
+A header the code needs is missing or has been renamed. See [Tabs and columns](#tabs-and-columns).
+
+**`No tab named 'Services' was found`**
+
+The tab must be named exactly `Services`. The sweep still runs without it, and flags `Add:` and `Change:` lines as "services list not loaded".
+
+**A cell or row is colored and has a note**
+
+See [Flags on the sheet](#flags-on-the-sheet) for what each one means and how to clear it.
+
+## Security
+
+This repository is public. Treat everything committed to it as visible to anyone, permanently.
+
+**Never commit:**
+
+- `.env` or `config/service_account.json`, or any key, token, or password
+- anything with claimant details: names, dates of birth, case IDs, phone numbers. That includes screenshots, sample files, and logs pasted into a pull request or issue.
+- `templates/`, `testing pdfs/`, `data/`, `logs/`, generated reports, or `.venv/`
+- real values in `.env.example`, which is for variable names only
+
+Add files by name (`git add path/to/file`), not `git add .`, and read `git status` and `git diff --staged` before committing.
+
+Use your own Dropbox app and your own copy of the sheet while developing. Production credentials belong only on the machine that runs production.
+
+**If a secret is committed,** treat it as exposed even after deleting it, because the history keeps it and the repository is public. In this order:
+
+1. Revoke it and make a new one. For Dropbox, regenerate the app secret and revoke the token in the App Console. For a Google service account, delete the key in the Cloud Console and create another. For SMTP, change the password.
+2. Tell the team.
+3. Only then, if needed, clean the history.
+
+## Maintenance
+
+- Update `requirements.txt` whenever dependencies change, and add any new environment variable to `.env.example` without a real value.
+- Keep `run_scheduler.sh` paths in sync with the machine where it runs.
+- If the PDF format changes, update the extraction logic in `app/pdf_extractor.py`.
+- If the schedule table changes, update the headers and row generation in `app/schedule_generator.py`.
+- If template placeholders change, update the replacements in `app/template_filler.py`.
+- The Services tab can be edited with no code change. Add rows and aliases there.
+- Test editions change over time, and a mismatch is the first thing to check when a test isn't recognized. Trinity Tree gives the current edition of a test even when a referral lists an older one, so a PDF can show an older code than the test actually given. How newer editions should appear in the Services tab is still being decided.
+- The sheet layout is a draft. Check [Tabs and columns](#tabs-and-columns) before renaming a header.
+
+**Known gaps**
+
+- The DOCX pipeline and the sheet are not connected. Cases are added to the sheet by hand.
+- Test changes are checked but not written into the sheet.
+- A flagged comment whose text is deleted entirely keeps its orange fill and note.
+- The sweep ends with a "Press Enter to close" prompt, which would hang a scheduled run.
+- A PDF whose case ID can't be read is written to the sheet as a row with a blank Case ID.
+
+### Contributing
+
+**Branches and pull requests**
+
+- Start from a fresh `main`: `git checkout main`, `git pull origin main`, then `git checkout -b <type>/<short-name>`, where the type is `feature`, `fix`, `docs`, or `chore`.
+- Nothing is pushed straight to `main`. Every change goes through a pull request and needs an approval. Ask both other teammates to review, and whoever is free first can take it. Changes to shared files, such as `tests/fakes.py`, `.gitignore`, `requirements.txt`, `config/settings.json`, `app/sheet_client.py`, or anything touching credentials, should be seen by both.
+- One concern per pull request. If unrelated changes pile up on a branch, split them into separate branches. Stack one branch on another only when the second really needs the first.
+- Keep a pull request small enough to review. A very large change with no docstrings can't be reviewed.
+
+**Before you push**
+
+- Run `python -m pytest`. New behavior comes with tests. Write logic so it takes the worksheet or client as a parameter, so it can be tested with the stand-ins in `tests/fakes.py`.
+- Anything that touches the real sheet or Dropbox also gets checked by hand against your sandbox, and a script in `scripts/` if the check is worth repeating.
+- Don't name an imported function so it starts with `test`: pytest collects it as a test.
+- Anything that moves or changes real data defaults to a dry run and needs an explicit flag, such as `--live`, to act.
+- Don't fail silently. When something can't be used, say what and why: a flag on the sheet, or a message naming it. Don't guess.
+- Put a docstring at the top of each module explaining the flow and the rules, and on each public function.
+- Update this README when behavior changes.
+
+**The pull request description** is written in markdown, with:
+
+1. **Summary** and **Why**
+2. **Changes**, file by file
+3. **How to test**: the exact commands and what to expect
+4. **Not in this PR**: what is deliberately left out, and any known limits
+
+Say what you checked by hand, and name any behavior change.
+
+**Reviewing**
+
+- Separate what blocks the merge from what can follow. Say why something is a problem, not just that it is.
+- Ask about code you haven't seen instead of assuming.
+- Check a fix in the code before resolving its thread. A "request changes" review stays until the same reviewer approves.
 
 ## License
 
-No license file is currently included. Add a license before publishing publicly if others should be allowed to use, modify, or distribute this project.
+No license file is currently included, so by default all rights are reserved. Trinity Tree should decide whether to add one, since the repository is public.
