@@ -196,3 +196,111 @@ python get_refresh_token.py
 7. Paste the authorization code back into the terminal.
 8. Copy the printed `DROPBOX_REFRESH_TOKEN=...` value into `.env`.
 9. In Dropbox, create the three folders the pipeline uses (for example `incoming_pdfs`, `processed_pdfs`, and `schedules`), inside `Apps/<your app name>/` for an app-folder app. Set the three folder variables in `.env` to match, following the path rules above.
+
+## Configuration
+
+Settings are split in two, by one rule: anything that is the same for everyone lives in `config/settings.json`, which is committed. Anything that differs between machines or people lives in `.env`, which is not. That's why Dropbox folder paths, credentials, and the sheet ID are in `.env` (see [Setup](#setup)).
+
+`config/settings.json` holds the shared runtime settings:
+
+```json
+{
+  "base_folder": "data",
+  "adult_age_cutoff": 18,
+  "max_files_per_run": 200,
+  "adult_template_path": "templates/adult_report_template.docx",
+  "child_template_path": "templates/child_report_template.docx",
+  "generated_docs_folder": "reports",
+  "health_check": {
+    "log_folder": "logs",
+    "email_notifications_enabled": false,
+    "email_subject_prefix": "[Trinity Scheduler]"
+  }
+}
+```
+
+Settings:
+
+- `base_folder`: local working folder for downloaded PDFs, local schedules, and processed PDFs.
+- `adult_age_cutoff`: age used to choose the adult or child report template.
+- `max_files_per_run`: maximum number of PDFs to process in one scheduler run.
+- `adult_template_path`: path to the adult DOCX template.
+- `child_template_path`: path to the child DOCX template.
+- `generated_docs_folder`: local folder for filled report documents.
+- `health_check.log_folder`: folder for scheduler logs.
+- `health_check.email_notifications_enabled`: turns failure emails on or off. Off by default.
+- `health_check.email_subject_prefix`: prefix added to failure email subjects.
+
+Relative paths resolve from the project root, so run everything from there.
+
+## Template Placeholders
+
+The report templates are DOCX files in `templates/`, which is not in the repository (see [Project Structure](#project-structure)). The scheduler replaces these placeholders wherever they appear in paragraphs, tables, headers, or footers:
+
+```text
+{{FULL_NAME}}
+{{FIRST_NAME}}
+{{First_name}}
+{{First_Name}}
+{{first_name}}
+{{LAST_NAME}}
+{{CASE_NUMBER}}
+{{DOB}}
+{{DATE_OF_EXAMINATION}}
+{{REFERRED_BY}}
+{{ALLEGATIONS}}
+{{EXAMINER}}
+{{DOCTOR_FULL_NAME}}
+```
+
+`{{EXAMINER}}` and `{{DOCTOR_FULL_NAME}}` are intentionally rendered in red by the current template filler.
+
+## Running Manually
+
+With the virtual environment active, from the project root:
+
+```bash
+python main.py
+```
+
+This runs the DOCX pipeline only. It does not touch the Google Sheet.
+
+On startup, the scheduler checks that the required settings and the three Dropbox folder variables in `.env` are present, that the template files exist, and that the generated documents folder can be created. If anything is missing, the run stops with a message naming it, before any PDF is processed.
+
+A `scheduler.lock` file stops two runs from overlapping. It is removed when a run ends. If a run was killed hard and left the file behind, the next run exits saying another run is active. Delete the file once you're sure nothing is running.
+
+## Running With the Shell Script (macOS)
+
+`run_scheduler.sh` is a runner for local scheduled runs on macOS. The current team has not tested it. Anyone who works on a Mac is welcome to correct this section and the one below.
+
+```bash
+chmod +x run_scheduler.sh
+./run_scheduler.sh
+```
+
+Before using it on another machine, edit the `cd` line so it points to that machine's project folder:
+
+```bash
+cd "/path/to/trinity-dropbox-scheduler"
+```
+
+The script activates a virtual environment folder named `venv` (not `.venv`, which the Setup section uses), runs `main.py`, appends normal output to `logs/scheduler.log`, and appends errors to `logs/scheduler_error.log`. Create `venv`, or edit the script to match.
+
+## Scheduling on macOS
+
+This section has not been tested by the current team. The repository includes a Word guide, `scheduler local enabler steps.docx`, for this setup. A typical launchd setup looks like this:
+
+1. Make `run_scheduler.sh` executable.
+2. Create a launch agent plist in `~/Library/LaunchAgents/`.
+3. Point the plist program argument to the full path of `run_scheduler.sh`.
+4. Configure the interval or calendar schedule.
+5. Load the plist with `launchctl`.
+6. Check `logs/launchd.log`, `logs/launchd_error.log`, `logs/scheduler.log`, and `logs/scheduler_error.log`.
+
+Example launchd commands:
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.trinity.scheduler.plist
+launchctl unload ~/Library/LaunchAgents/com.trinity.scheduler.plist
+launchctl list | grep trinity
+```
