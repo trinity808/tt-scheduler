@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 
 from gspread.utils import rowcol_to_a1
 
+from app.case_metadata import set_case_tests
 from app.pdf_extractor import extract_schedule_data
 from app.sheet_client import update_case_field
 
@@ -96,12 +97,44 @@ def flag_duplicate_row(worksheet, row_number, num_columns):
     )
 
 
-def add_or_update_case(worksheet, extracted_data):
+class MetadataWriteError(Exception):
+    """
+    The case's row was written, but its original tests couldn't be stored.
+    The row is in the sheet, so nothing is lost; a caller that doesn't mark
+    the PDF as processed will retry, and a retry just updates the row again
+    and stores the tests.
+    """
+
+    def __init__(self, case_id, action, row_number, cause):
+        super().__init__(
+            f"Case {case_id} was {action} at row {row_number}, but its "
+            f"original tests couldn't be stored: {cause}"
+        )
+        self.case_id = case_id
+        self.action = action
+        self.row_number = row_number
+
+
+def _store_original_tests(metadata, extracted_data, case_id, action, row_number):
+    codes = [service["code"] for service in extracted_data.get("services") or []]
+    try:
+        set_case_tests(metadata, row_number, case_id, codes)
+    except Exception as error:
+        raise MetadataWriteError(case_id, action, row_number, error) from error
+
+
+def add_or_update_case(worksheet, extracted_data, metadata=None):
     """
     Adds extracted_data as a new row if its Case ID isn't already in
     the tab, or updates the extraction-derived fields of the existing
     row in place if it is, flagging the row so the duplicate is
     visible. Manual-entry fields are left untouched either way.
+
+    When a metadata client is given, the case's original tests (the codes
+    from the PDF) are also stored on its row as hidden metadata, for later
+    steps that rebuild a case's tests from that original. This happens for
+    a new case and again for a repeated one, since a repeat refreshes the
+    Services Requested cell from the PDF and the stored original must match.
 
     New cases go into the first row after the last row that has a
     Case ID, not appended after the last non-empty row. That way a
@@ -110,9 +143,18 @@ def add_or_update_case(worksheet, extracted_data):
     the case lands in. A gap left by a hand-cleared row stays a gap
     rather than pulling new cases out of order.
 
+    If `metadata` (a client for the hidden per-row metadata, see
+    case_metadata.py) is given, the case's original tests are stored on
+    its row. A blank Case ID raises ValueError before anything is
+    written, since the stored entry couldn't be checked against its row.
+    If storing fails after the row is written, MetadataWriteError is
+    raised; the row stays.
+
     Returns a tuple: ("added" | "updated", row_number).
     """
     case_id = str(extracted_data.get("case_id", "")).strip()
+    if metadata is not None and not case_id:
+        raise ValueError("A Case ID is needed to store a case's original tests")
 
     all_values = worksheet.get_all_values()
     headers = all_values[0]
@@ -137,6 +179,10 @@ def add_or_update_case(worksheet, extracted_data):
                 continue
             update_case_field(worksheet, existing_row_number, header, value)
         flag_duplicate_row(worksheet, existing_row_number, len(headers))
+        if metadata is not None:
+            _store_original_tests(
+                metadata, extracted_data, case_id, "updated", existing_row_number
+            )
         return "updated", existing_row_number
 
     target_row = last_case_row + 1
@@ -165,12 +211,14 @@ def add_or_update_case(worksheet, extracted_data):
     start = rowcol_to_a1(target_row, 1)
     end = rowcol_to_a1(target_row, len(headers))
     worksheet.update(range_name=f"{start}:{end}", values=[merged])
-
+    if metadata is not None:
+        _store_original_tests(metadata, extracted_data, case_id, "added", target_row)
     return "added", target_row
 
 
 if __name__ == "__main__":
     from app.sheet_client import get_client
+    from app.sheets_metadata_client import SheetsMetadataClient
 
     pdf_path = input("Path to a test PDF (e.g. testing pdfs/Test1-may4_2026.pdf): ").strip()
     extracted = extract_schedule_data(pdf_path)
@@ -187,7 +235,14 @@ if __name__ == "__main__":
 
     confirm = input("\nAdd or update this case in the Ongoing tab? (y/n): ").strip().lower()
     if confirm == "y":
-        action, row_number = add_or_update_case(ongoing, extracted)
+        try:
+            action, row_number = add_or_update_case(
+                ongoing, extracted, metadata=SheetsMetadataClient(ongoing)
+            )
+        except MetadataWriteError as error:
+            print(f"\nThe row was written, but: {error}")
+            print("Running it again is safe: it will update the row and try again.")
+            raise SystemExit(1)
         if action == "added":
             print(f"Added at row {row_number}.")
         else:
