@@ -535,3 +535,193 @@ The sheet's own flags only ever set a background color and a note. They never ch
 To clear a duplicate flag: select the row, then Fill color, then Reset, then right-click the Case ID cell and choose Delete note. Don't use "Clear formatting", which also removes the text colors.
 
 If a case needs removing, delete its row. Clearing its cells leaves the fill and notes behind.
+
+## Testing
+
+### Automated tests
+
+Install the development dependencies, then run the suite from the project root:
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -v
+```
+
+Use `python -m pytest`, not plain `pytest`, so the project root is on the import path.
+
+The tests run in memory. They need no Dropbox or Google credentials, because the Google Sheets code takes the sheet as a parameter and the tests hand it a stand-in from `tests/fakes.py`. They cover the comment parser, the Services lookup and its tab, the sweep, adding and moving cases, the console report, the schedule sort, and the PDF pipeline.
+
+`tests/test_local_pipeline.py` runs the real extraction and report code against sample PDFs. It needs the local-only `templates/` and `testing pdfs/` folders and skips itself, with a reason, when they are missing.
+
+A stand-in only behaves the way it was written to. It cannot show how real Google Sheets behaves, which is where bugs have turned up before. Anything that talks to the real sheet should also get a live check against your own sandbox sheet.
+
+### Live checks
+
+```bash
+python scripts/check_sheet_connection.py
+```
+
+This opens the sheet set in `.env` and prints its tabs and their headers. It does not import from `app/`, so it runs directly.
+
+### Trying the DOCX pipeline by hand
+
+Sample PDFs are in `testing pdfs/` (local only). To test end to end:
+
+1. Put one sample PDF in the configured Dropbox input folder.
+2. Run `python main.py`.
+3. Confirm the PDF was moved to the processed Dropbox folder.
+4. Confirm the matching schedule DOCX was uploaded to the Dropbox schedules folder.
+5. Confirm the local report DOCX was created in `generated_docs_folder`.
+6. Check `logs/scheduler.log` for extracted values and final counts.
+
+To test extraction only, with no Dropbox involved:
+
+```bash
+python -c "from app.pdf_extractor import extract_schedule_data as e; [print(k, v, sep=': ') for k, v in e('testing pdfs/Test1-may4_2026.pdf').items()]"
+```
+
+### Trying the sheet by hand
+
+Use your own sandbox sheet, never the production one.
+
+1. Add a case: `python -m app.ongoing_row_mapper`, with a sample PDF.
+2. Type a note in that case's Comments cell, for example `Provider: Dr. Shelton`.
+3. Run the sweep: `python -m app.apply_comment_updates`.
+4. Check the Provider column and read the report.
+5. Make a deliberate typo in the comment, such as `Provder:`, and run the sweep again. The Comments cell should turn orange with a note that suggests the right spelling.
+
+## Troubleshooting
+
+**`DROPBOX_APP_KEY not found in .env`** (or the secret, or the refresh token)
+
+Make sure `.env` exists in the project root and contains the Dropbox credentials. If only the refresh token is missing, run `python get_refresh_token.py`, approve the app, and paste the token into `.env`.
+
+**`Startup health check failed: Missing .env value: DROPBOX_INPUT_FOLDER`**
+
+The message names what's missing. The three Dropbox folder variables, the settings in `config/settings.json`, and the template files are all checked before any PDF is processed. A `Template file not found` message means `templates/` is missing, since it isn't in the repository.
+
+**`not_found` on the first Dropbox call**
+
+A Dropbox folder variable doesn't match the app's access type. App folder apps use short paths such as `/incoming_pdfs`. Full Dropbox apps need the full path, such as `/Apps/<your app name>/incoming_pdfs`. See [Dropbox folder paths](#dropbox-folder-paths).
+
+**`ModuleNotFoundError: No module named 'app'`**
+
+Run the script as a module from the project root: `python -m app.apply_comment_updates`, not `python app/apply_comment_updates.py`. Only `scripts/check_sheet_connection.py` runs directly.
+
+**`Another scheduler run is already active. Exiting.`**
+
+A previous run left `scheduler.lock` behind. If nothing is running, delete the file.
+
+**The Windows scheduled task does nothing**
+
+See the mistakes listed under [Scheduling on Windows](#scheduling-on-windows), and check the task's History tab.
+
+**No PDFs are processed**
+
+Confirm that `DROPBOX_INPUT_FOLDER` is correct and the folder contains files ending in `.pdf`.
+
+**The wrong adult or child template is selected**
+
+Check that the PDF contains a readable date of birth and appointment date. The app compares the claimant's age on the schedule date to `adult_age_cutoff`.
+
+**Email notifications do not send**
+
+Confirm `email_notifications_enabled` is `true`, the SMTP values are in `.env`, and the account allows app-password or SMTP access. Microsoft 365 mailboxes no longer accept a plain username and password.
+
+**`FileNotFoundError` for `service_account.json`**
+
+The key isn't where `GOOGLE_SERVICE_ACCOUNT_FILE` points. The default is `config/service_account.json`.
+
+**A Google error saying permission denied, or `SpreadsheetNotFound`**
+
+Usually the sheet isn't shared with the service account's email address, or `GOOGLE_SHEETS_ID` is wrong. An error saying an API "has not been used in project ... or it is disabled" means the Sheets API or the Drive API needs enabling in the Google Cloud project.
+
+**A `ValueError` naming a column, such as `'Comments' column not found`**
+
+A header the code needs is missing or has been renamed. See [Tabs and columns](#tabs-and-columns).
+
+**`No tab named 'Services' was found`**
+
+The tab must be named exactly `Services`. The sweep still runs without it, and flags `Add:` and `Change:` lines as "services list not loaded".
+
+**A cell or row is colored and has a note**
+
+See [Flags on the sheet](#flags-on-the-sheet) for what each one means and how to clear it.
+
+## Security
+
+This repository is public. Treat everything committed to it as visible to anyone, permanently.
+
+**Never commit:**
+
+- `.env` or `config/service_account.json`, or any key, token, or password
+- anything with claimant details: names, dates of birth, case IDs, phone numbers. That includes screenshots, sample files, and logs pasted into a pull request or issue.
+- `templates/`, `testing pdfs/`, `data/`, `logs/`, generated reports, or `.venv/`
+- real values in `.env.example`, which is for variable names only
+
+Add files by name (`git add path/to/file`), not `git add .`, and read `git status` and `git diff --staged` before committing.
+
+Use your own Dropbox app and your own copy of the sheet while developing. Production credentials belong only on the machine that runs production.
+
+**If a secret is committed,** treat it as exposed even after deleting it, because the history keeps it and the repository is public. In this order:
+
+1. Revoke it and make a new one. For Dropbox, regenerate the app secret and revoke the token in the App Console. For a Google service account, delete the key in the Cloud Console and create another. For SMTP, change the password.
+2. Tell the team.
+3. Only then, if needed, clean the history.
+
+## Maintenance
+
+- Update `requirements.txt` whenever dependencies change, and add any new environment variable to `.env.example` without a real value.
+- Keep `run_scheduler.sh` paths in sync with the machine where it runs.
+- If the PDF format changes, update the extraction logic in `app/pdf_extractor.py`.
+- If the schedule table changes, update the headers and row generation in `app/schedule_generator.py`.
+- If template placeholders change, update the replacements in `app/template_filler.py`.
+- The Services tab can be edited with no code change. Add rows and aliases there.
+- Test editions change over time, and a mismatch is the first thing to check when a test isn't recognized. Per Dr. Shelton, Trinity Tree gives the current edition of a test even when a referral lists an older one, so a PDF can show an older code than the test actually given. How newer editions should appear in the Services tab is still being decided.
+- The sheet layout is a draft. Check [Tabs and columns](#tabs-and-columns) before renaming a header.
+
+**Known gaps**
+
+- The DOCX pipeline and the sheet are not connected. Cases are added to the sheet by hand.
+- Test changes are checked but not written into the sheet.
+- A flagged comment whose text is deleted entirely keeps its orange fill and note.
+- The sweep ends with a "Press Enter to close" prompt, which would hang a scheduled run.
+- A PDF whose case ID can't be read is written to the sheet as a row with a blank Case ID.
+
+### Contributing
+
+**Branches and pull requests**
+
+- Start from a fresh `main`: `git checkout main`, `git pull origin main`, then `git checkout -b <type>/<short-name>`, where the type is `feature`, `fix`, `docs`, or `chore`.
+- Nothing is pushed straight to `main`. Every change goes through a pull request and needs an approval. Ask both other teammates to review, and whoever is free first can take it. Changes to shared files, such as `tests/fakes.py`, `.gitignore`, `requirements.txt`, `config/settings.json`, `app/sheet_client.py`, or anything touching credentials, should be seen by both.
+- One concern per pull request. If unrelated changes pile up on a branch, split them into separate branches. Stack one branch on another only when the second really needs the first.
+- Keep a pull request small enough to review. A very large change with no docstrings can't be reviewed.
+
+**Before you push**
+
+- Run `python -m pytest`. New behavior comes with tests. Write logic so it takes the worksheet or client as a parameter, so it can be tested with the stand-ins in `tests/fakes.py`.
+- Anything that touches the real sheet or Dropbox also gets checked by hand against your sandbox, and a script in `scripts/` if the check is worth repeating.
+- Don't name an imported function so it starts with `test`: pytest collects it as a test.
+- Anything that moves or changes real data defaults to a dry run and needs an explicit flag, such as `--live`, to act.
+- Don't fail silently. When something can't be used, say what and why: a flag on the sheet, or a message naming it. Don't guess.
+- Put a docstring at the top of each module explaining the flow and the rules, and on each public function.
+- Update this README when behavior changes.
+
+**The pull request description** is written in markdown, with:
+
+1. **Summary** and **Why**
+2. **Changes**, file by file
+3. **How to test**: the exact commands and what to expect
+4. **Not in this PR**: what is deliberately left out, and any known limits
+
+Say what you checked by hand, and name any behavior change.
+
+**Reviewing**
+
+- Separate what blocks the merge from what can follow. Say why something is a problem, not just that it is.
+- Ask about code you haven't seen instead of assuming.
+- Check a fix in the code before resolving its thread. A "request changes" review stays until the same reviewer approves.
+
+## License
+
+No license file is currently included, so by default all rights are reserved. Trinity Tree should decide whether to add one, since the repository is public.
