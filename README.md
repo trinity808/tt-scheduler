@@ -304,3 +304,234 @@ launchctl load ~/Library/LaunchAgents/com.trinity.scheduler.plist
 launchctl unload ~/Library/LaunchAgents/com.trinity.scheduler.plist
 launchctl list | grep trinity
 ```
+
+## Scheduling on Windows
+
+Windows Task Scheduler can run the DOCX pipeline (`main.py`) on a repeating schedule. This schedules the pipeline only. The sheet tracking is not scheduled yet.
+
+1. Open Task Scheduler and choose **Create Task**. Use this, not the Basic Task wizard, which hides settings you need.
+2. **General:** give it a name. "Run only when user is logged on" is the option this has been tested with.
+3. **Triggers:** New, then begin the task **On a schedule**, Daily. Tick **Repeat task every** and pick an interval, for a duration of **Indefinitely**. Testing used 5 minutes. The right interval for real use is still to be decided.
+4. **Actions:** New, **Start a program**, and fill in the three fields separately:
+   - **Program/script:** the full path to the virtual environment's Python, for example `C:\Codes\tt-scheduler\.venv\Scripts\python.exe`
+   - **Add arguments:** `main.py`
+   - **Start in:** the project root, for example `C:\Codes\tt-scheduler`
+5. **Conditions:** on a laptop, untick **Start the task only if the computer is on AC power**, otherwise the task quietly doesn't run on battery. This has not been tested.
+6. Save, then right-click the task and choose **Run** to try it now, without waiting for the trigger.
+
+Nothing appears on screen when it runs, even when it works. Check `logs/scheduler.log` for a fresh entry, and `logs/scheduler_error.log` for errors. For the exit code of the last run, open the task's **History** tab. If it's empty, click **Enable All Tasks History** in the right-hand pane first.
+
+Mistakes made while setting this up, and what each looks like:
+
+- **The program and its arguments in one field.** The task fails to start at all. They belong in two separate fields.
+- **The wrong environment folder name,** such as `venv` where it's `.venv`. The task fails to start. Open the action and check the path.
+- **A missing "Start in" folder.** The program starts from a system folder, and every relative path (settings, templates, logs) breaks.
+- **Dropbox folder paths in `.env` that don't match the app's access type.** The run starts but fails at its first Dropbox call with a `not_found` error in `logs/scheduler_error.log`. See [Dropbox folder paths](#dropbox-folder-paths).
+
+Not tested: "Run whether user is logged on or not", running while the computer is asleep, and the wake-the-computer option.
+
+## Processing Flow
+
+1. `main.py` loads `config/settings.json`.
+2. Logging is configured by `app/health_monitor.py`.
+3. A `scheduler.lock` file is created to prevent overlapping runs.
+4. Dropbox PDFs are listed from the folder in `DROPBOX_INPUT_FOLDER`.
+5. Each PDF is downloaded into `data/incoming_pdfs/`.
+6. `app/pdf_extractor.py` extracts scheduling data.
+7. `app/template_filler.py` fills the adult or child report template.
+8. The existing same-day schedule DOCX is downloaded from Dropbox if present.
+9. `app/schedule_generator.py` creates or updates the local schedule DOCX.
+10. The updated schedule is uploaded to the folder in `DROPBOX_SCHEDULE_FOLDER`.
+11. The original PDF is moved to the folder in `DROPBOX_PROCESSED_PDF_FOLDER`.
+12. Successes and failures are written to logs.
+13. The lock file is removed when the run exits.
+
+This flow does not write to the Google Sheet. See [Tracking Sheet](#tracking-sheet) for how cases get onto it.
+
+## Output Files
+
+Generated report documents are saved to `generated_docs_folder` from `config/settings.json`, which is `reports/` by default.
+
+Schedule files are created locally under `data/schedules/` and uploaded to the Dropbox schedule folder. Processed PDFs are moved in Dropbox to the processed folder.
+
+## Logs and Alerts
+
+Logs are written to:
+
+```text
+logs/scheduler.log
+logs/scheduler_error.log
+```
+
+On macOS, the launchd setup also writes `logs/launchd.log` and `logs/launchd_error.log`.
+
+The Python logger writes the first two itself, in rotating files with a 2 MB limit and 5 backups. Each line looks like this:
+
+```text
+2026-09-22 17:25:42,003 | INFO | trinity_scheduler | Run complete.
+```
+
+Only logger output reaches these files. Some low-level messages in `apis/dropbox_api.py`, such as the upload and move confirmations, are plain `print` calls. They appear on the console but not in the log, and the run's own log lines already record the same steps. The macOS shell script also appends the console output to the same files, which has not been tested.
+
+When email alerts are enabled in `config/settings.json`, a failed PDF or a fatal run failure sends an email using the SMTP values in `.env`. They are off by default. The SMTP settings use a plain username and password, so a Gmail account needs an app password. Microsoft 365 mailboxes no longer accept that kind of login and would need a different approach.
+
+## Tracking Sheet
+
+> **Status:** the Google Sheet tracking is in development. It runs alongside the DOCX pipeline, nothing in it is scheduled yet, and the layout below is a working draft that will change as the pieces come together. It will be revisited after it has run in production.
+<!-- Revisit this whole section once the sheet is proven in production and OA signs off. -->
+
+The sheet has three tabs. Tab names must match exactly, and every tab has its headers in row 1.
+
+### Tabs and columns
+
+**Ongoing**: one row per open case.
+
+```text
+Case ID | Patient Name | Phone | DOB | Adult | Child | Date & Time | Services Requested | Allegations | Psychometrist | Provider | Price | Comments
+```
+
+**Finished**: cases that have been completed.
+
+```text
+Case ID | Patient Name | Phone | Psychometrist | Provider | Price | Payment Status | Date Completed
+```
+
+**Services**: the list of tests, used to turn short names into full codes.
+
+```text
+Code | Aliases | Name | Price
+```
+
+The code finds columns by their header name, not their position, so columns can be reordered or added without changing anything. Renaming a header the code uses breaks that feature. These are the ones it depends on:
+
+| Tab | Headers the code needs |
+|---|---|
+| Ongoing | `Case ID` everywhere. `Provider`, `Psychometrist`, and `Comments` for the sweep. The other headers are filled from the PDF if present and left blank if not. |
+| Finished | `Case ID`. Any header that also exists in Ongoing is copied across. `Payment Status` and `Date Completed` are filled only by whatever moves the case, and are blank otherwise. |
+| Services | `Code` and `Aliases`. `Name` and `Price` are for people and are not read. |
+
+These columns are a draft and may change. If you rename or remove one, search the repository for the header's name to find what uses it, for example `git grep -n "Payment Status"`.
+
+Who fills what on the Ongoing tab: everything up to `Allegations`, plus `Price`, comes from the PDF. `Psychometrist` and `Provider` are filled by the sweep from the Comments column. `Comments` is written by OA. `Price` is the total printed on the PDF. Final billed amounts are set separately on the billing request forms and are not tracked here.
+
+### Adding a case
+
+```bash
+python -m app.ongoing_row_mapper
+```
+
+It asks for the path to a PDF on your computer, shows the row it would write, and asks for confirmation. It takes a local file path, not a Dropbox path. Nothing connects Dropbox to the sheet yet, so cases are added this way.
+
+- **A new case** goes into the first row after the last row that has a Case ID. Template text that OA has pre-filled in empty rows below the data does not push it down, and is kept. A blank row in the middle of the data is not filled.
+- **A repeated Case ID** updates that row in place instead of adding a second one. Everything taken from the PDF is refreshed, including `Price`, so a hand edit to those columns is overwritten. `Psychometrist`, `Provider`, and `Comments` are left alone. The row turns yellow with a note, so the repeat is not silent.
+
+### Comments format
+
+This part is written so it can be shared with OA on its own.
+
+OA writes notes about a case in its **Comments** cell. Put each item on its own line (Ctrl+Enter, or Cmd+Enter on a Mac, starts a new line inside a cell), or separate items with a semicolon. Capitalization doesn't matter.
+
+```text
+Provider: Dr. Shelton
+Psychometrist: J. Smith
+Add: WMS, VABS
+Change: CTONI to WAIS
+```
+
+- `Provider:` and `Psychometrist:` fill the Provider and Psychometrist columns.
+- `Add:` lists tests to add, separated by commas.
+- `Change:` replaces one test with another. Name both, for example `Change: WISC to WIAT`. Several can be listed, separated by commas.
+- A line left blank is ignored, so a copy of the empty template can be filled in with only what applies:
+
+```text
+Provider:
+Psychometrist:
+Add:
+Change:
+```
+
+Tests are written by short name, such as `wms`, `WISC-V`, or `Psychiatric Exam`. Spaces, capitalization, and punctuation don't matter. A name that isn't in the Services tab, or that matches two tests, is flagged so it can be corrected.
+
+If a line can't be used, the Comments cell turns orange and gets a note saying what was wrong and what was done with that line. The problems it catches are a misspelled field name (with a suggestion), a line with no colon, an unknown test, two fields crammed onto one line, and the same field given twice. A line that can't be used is skipped, and the rest of the comment still applies. Fix the comment, and the orange clears itself the next time the sweep runs.
+
+`Price:` and `+Service:`, from an earlier draft of this format, are no longer recognized.
+
+Test changes (`Add` and `Change`) are checked, and any problems are flagged, but they are not yet written into the sheet.
+
+### Running the sweep
+
+```bash
+python -m app.apply_comment_updates
+```
+
+One run does this, in order:
+
+1. Loads the Services tab, and flags any problems with it.
+2. Reads the Comments cell of every case.
+3. Fills in `Provider` and `Psychometrist` where the comment names someone different from what is there. An unchanged value is never rewritten, and the comment is the source of truth for these two columns, so a different name typed straight into the column is replaced the next time the sweep runs.
+4. Flags any comment with a problem.
+5. Prints a plain-language report.
+
+Rows with no Case ID are skipped entirely, comment and all, so a template kept in a spare row is left alone. Running it again and again is safe. It ends with "Press Enter to close", which suits a manual run and would hang a scheduled one, so it is not scheduled yet.
+
+A sample of the report:
+
+```text
+Services tab needs attention:
+  - Row 5: 'Beery VMI' isn't a valid service code (five digits, e.g. 96101-WISC-V), so it was skipped
+  (noted on the Services tab)
+
+Case 15419897:
+  Provider: updated from Dr. Smith to Dr. Shelton
+  Psychometrist: set to J. Smith
+  Test changes found (not applied to the sheet yet):
+    add 96130-CARS-2
+    change 96101-WISC-V to 96101-WAIS-IV
+
+Case 15419372:
+  NEEDS ATTENTION:
+    Add: wisk  (skipped: unknown test 'wisk', did you mean WISC?)
+
+2 comment(s) processed, 2 field(s) updated, 1 flagged for attention. 2 test change(s) found, not applied to the sheet yet.
+Flagged cases: 15419372
+```
+
+If the Services tab is missing or unusable, the sweep still runs. Provider and Psychometrist are still filled in, and `Add:` and `Change:` lines are flagged as "services list not loaded".
+
+### Moving a case to Finished
+
+```bash
+python -m app.sheet_case_mover
+```
+
+It asks for a Case ID, and optionally a Payment Status and a Date Completed. The case is written to the Finished tab, in the first row after the last case, and only then deleted from Ongoing. If the write fails, the case is still in Ongoing. Moving cases is manual for now.
+
+### The Services tab
+
+Each row is one test. A row's `Code` is the code as the authorization PDF prints it, including the edition, for example `96101-WISC-V` (five digits, then letters, digits, or hyphens). A row answers to:
+
+- its full code, `96101-WISC-V`
+- the part after the five digits, `WISC-V`, which is worked out automatically
+- anything in the `Aliases` column, separated by commas, such as `WISC`
+
+Editing the tab needs no code change. The sweep reads it fresh each run. The tab is edited by people, so a problem in one row doesn't stop the rest:
+
+- A row whose `Code` isn't a valid service code is skipped and reported. A test with no billing code can't be listed yet.
+- A name that points to more than one row is reported and not accepted until it's fixed, for example an alias that matches another test's abbreviation.
+- A missing tab, an empty tab, or a missing `Code` or `Aliases` header is reported, and the sweep carries on without test names.
+
+Problems appear in the report, and as a note on cell A1 of the Services tab. The note clears itself once the table is fixed. A note someone else has put on A1 is never overwritten, and the report says so instead.
+
+### Flags on the sheet
+
+| What you see | What it means | Does it clear itself? |
+|---|---|---|
+| A yellow row, with a note on the Case ID cell saying "Duplicate entry received" | The same case arrived again. Details from the PDF were refreshed, and Provider, Psychometrist, and Comments were left alone. | No. Clear it by hand, or it goes when the case moves to Finished. |
+| An orange Comments cell, with a note | A line in the comment couldn't be used. | Yes, once the comment is fixed and the sweep runs again. Deleting the comment text entirely leaves the flag behind, which is a known gap. |
+| A note on the top-left cell of the Services tab | A problem with the Services table. | Yes, once the table is fixed and the sweep runs again. |
+
+The sheet's own flags only ever set a background color and a note. They never change text color, so OA's blue and red markings for attended and no-show cases are left alone.
+
+To clear a duplicate flag: select the row, then Fill color, then Reset, then right-click the Case ID cell and choose Delete note. Don't use "Clear formatting", which also removes the text colors.
+
+If a case needs removing, delete its row. Clearing its cells leaves the fill and notes behind.
