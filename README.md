@@ -432,7 +432,7 @@ This part is written so it can be shared with OA on its own.
 OA writes notes about a case in its **Comments** cell. Put each item on its own line (Ctrl+Enter, or Cmd+Enter on a Mac, starts a new line inside a cell), or separate items with a semicolon. Capitalization doesn't matter.
 
 ```text
-Provider: Dr. Shelton
+Provider: Dr. Doe
 Psychometrist: J. Smith
 Add: WMS, VABS
 Change: CTONI to WAIS
@@ -482,7 +482,7 @@ Services tab needs attention:
   (noted on the Services tab)
 
 Case 15419897:
-  Provider: updated from Dr. Smith to Dr. Shelton
+  Provider: updated from Dr. Smith to Dr. Doe
   Psychometrist: set to J. Smith
   Test changes found (not applied to the sheet yet):
     add 96130-CARS-2
@@ -585,7 +585,7 @@ python -c "from app.pdf_extractor import extract_schedule_data as e; [print(k, v
 Use your own sandbox sheet, never the production one.
 
 1. Add a case: `python -m app.ongoing_row_mapper`, with a sample PDF.
-2. Type a note in that case's Comments cell, for example `Provider: Dr. Shelton`.
+2. Type a note in that case's Comments cell, for example `Provider: Dr. Doe`.
 3. Run the sweep: `python -m app.apply_comment_updates`.
 4. Check the Provider column and read the report.
 5. Make a deliberate typo in the comment, such as `Provder:`, and run the sweep again. The Comments cell should turn orange with a note that suggests the right spelling.
@@ -677,7 +677,7 @@ Use your own Dropbox app and your own copy of the sheet while developing. Produc
 - If the schedule table changes, update the headers and row generation in `app/schedule_generator.py`.
 - If template placeholders change, update the replacements in `app/template_filler.py`.
 - The Services tab can be edited with no code change. Add rows and aliases there.
-- Test editions change over time, and a mismatch is the first thing to check when a test isn't recognized. Per Dr. Shelton, Trinity Tree gives the current edition of a test even when a referral lists an older one, so a PDF can show an older code than the test actually given. How newer editions should appear in the Services tab is still being decided.
+- Test editions change over time, and a mismatch is the first thing to check when a test isn't recognized. Trinity Tree gives the current edition of a test even when a referral lists an older one, so a PDF can show an older code than the test actually given. How newer editions should appear in the Services tab is still being decided.
 - The sheet layout is a draft. Check [Tabs and columns](#tabs-and-columns) before renaming a header.
 
 **Known gaps**
