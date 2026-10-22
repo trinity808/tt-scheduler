@@ -217,3 +217,79 @@ def test_real_table_psych_means_review_of_records():
     lookup = build_lookup(real_table())
     assert not lookup.is_ambiguous("psych")
     assert lookup.resolve("psych") == "99358-PSYCH"
+
+
+# --- Descriptions from the Name column ------------------------------
+
+
+def test_description_is_read_from_the_name_column():
+    lookup = build_lookup(table(
+        ["96101-WISC-V", "WISC", "Wechsler Intelligence Scale for Children - Ages 6 to 16 years"],
+    ))
+    assert lookup.description("96101-WISC-V") == (
+        "Wechsler Intelligence Scale for Children - Ages 6 to 16 years"
+    )
+
+
+def test_description_collapses_pasted_line_breaks_and_spaces():
+    lookup = build_lookup(table(
+        ["96101-WISC-V", "WISC", "  Wechsler Intelligence\nScale   for Children\t- Ages 6 to 16 years \n"],
+    ))
+    assert lookup.description("96101-WISC-V") == (
+        "Wechsler Intelligence Scale for Children - Ages 6 to 16 years"
+    )
+
+
+def test_blank_name_means_no_description():
+    lookup = build_lookup(table(["96101-WISC-V", "WISC", "   "]))
+    assert lookup.description("96101-WISC-V") is None
+
+
+def test_a_short_row_with_no_name_cell_means_no_description():
+    lookup = build_lookup(table(["96101-WISC-V", "WISC"]))
+    assert lookup.description("96101-WISC-V") is None
+
+
+def test_a_tab_without_a_name_column_still_works():
+    lookup = build_lookup([["Code", "Aliases"], ["96101-WISC-V", "WISC"]])
+    assert lookup.resolve("wisc") == "96101-WISC-V"
+    assert lookup.description("96101-WISC-V") is None
+
+
+def test_name_column_is_found_by_header_not_position():
+    lookup = build_lookup([
+        ["Name", "Aliases", "Code"],
+        ["Wechsler Intelligence Scale for Children", "WISC", "96101-WISC-V"],
+    ])
+    assert lookup.description("96101-WISC-V") == "Wechsler Intelligence Scale for Children"
+
+
+def test_unknown_code_has_no_description():
+    lookup = build_lookup(table(["96101-WISC-V", "WISC", "Wechsler"]))
+    assert lookup.description("96130-CARS-2") is None
+
+
+def test_a_skipped_row_keeps_no_description():
+    lookup = build_lookup(table(["Beery VMI", "", "Beery-Buktenica"]))
+    assert lookup.descriptions == {}
+
+
+def test_the_first_non_blank_name_wins_when_a_code_is_listed_twice():
+    lookup = build_lookup(table(
+        ["96101-WISC-V", "WISC", ""],
+        ["96101-WISC-V", "", "Wechsler Intelligence Scale for Children"],
+        ["96101-WISC-V", "", "A later, different name"],
+    ))
+    assert lookup.description("96101-WISC-V") == "Wechsler Intelligence Scale for Children"
+
+
+def test_name_is_for_reading_and_is_not_a_lookup_key():
+    lookup = build_lookup(table(["96101-WISC-V", "WISC", "Wechsler Intelligence Scale for Children"]))
+    assert lookup.resolve("Wechsler Intelligence Scale for Children") is None
+
+
+def test_real_table_descriptions():
+    lookup = build_lookup(real_table())
+    assert lookup.description("96101-WISC-V") == "Wechsler Intelligence Scale for Children"
+    assert lookup.description("96101-TONI-3") == "Test of Non Verbal Intelligence - Third Edition"
+    assert lookup.description("96130-AUTISM") == "Appropriate testing to evaluate Autism Spectrum Disorders"

@@ -24,6 +24,12 @@ everything:
     collides with another code's abbreviation) is left unusable,
     reported in `problems`, and recorded in `ambiguous`, rather than
     guessed. Every other key keeps working.
+
+The optional Name column is kept as each code's description, with any
+run of whitespace collapsed to one space, so a pasted line break can't
+split a line in the Services Requested cell. The sweep uses it to write
+a line for a test the PDF never listed. A blank or missing Name means no
+description, and the line shows just the code.
 """
 
 import difflib
@@ -47,6 +53,7 @@ class ServiceLookup:
     keys: dict = field(default_factory=dict)       # normalized key -> code
     display: dict = field(default_factory=dict)    # normalized key -> key as written
     ambiguous: dict = field(default_factory=dict)  # normalized key -> sorted codes
+    descriptions: dict = field(default_factory=dict)  # code -> Name column text
     problems: list = field(default_factory=list)   # messages about the table itself
 
     def resolve(self, text):
@@ -55,6 +62,10 @@ class ServiceLookup:
 
     def is_ambiguous(self, text):
         return normalize_key(text) in self.ambiguous
+
+    def description(self, code):
+        """The Name column's text for a code, or None if blank or unknown."""
+        return self.descriptions.get(code) or None
 
     def suggest(self, text):
         """The closest known key, as written in the table, or None."""
@@ -75,6 +86,7 @@ def build_lookup(rows):
             raise ValueError(f"Services tab is missing the '{required}' column")
     code_idx = headers.index("Code")
     aliases_idx = headers.index("Aliases")
+    name_idx = headers.index("Name") if "Name" in headers else None
 
     lookup = ServiceLookup()
     candidates = {}  # normalized key -> set of codes
@@ -91,6 +103,11 @@ def build_lookup(rows):
             )
             continue
 
+        if name_idx is not None and name_idx < len(row):
+            description = " ".join(row[name_idx].split())
+            if description:
+                lookup.descriptions.setdefault(code, description)
+                
         names = [code, _LEADING_DIGITS.sub("", code)]
         if aliases_idx < len(row):
             names += row[aliases_idx].split(",")
