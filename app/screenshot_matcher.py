@@ -54,14 +54,16 @@ SERVICE_ACCOUNT_FILE = os.getenv(
     "config/service_account.json",
 )
 
-DROPBOX_YEAR_FOLDER = os.getenv(
-    "DROPBOX_YEAR_FOLDER"
-)
+def get_year_folder():
+    """Return the configured Dropbox year folder."""
+    year_folder = os.getenv("DROPBOX_YEAR_FOLDER")
 
-if not DROPBOX_YEAR_FOLDER:
-    raise ValueError(
-        "DROPBOX_YEAR_FOLDER is missing from .env"
-    )
+    if not year_folder:
+        raise ValueError(
+            "DROPBOX_YEAR_FOLDER is missing from .env"
+        )
+
+    return year_folder
 
 IMAGE_EXTENSIONS = {
     ".png",
@@ -287,11 +289,12 @@ def find_date_folder(
     year = scheduled_datetime.year
     month = scheduled_datetime.month
     day = scheduled_datetime.day
+    year_folder = get_year_folder()
 
     if year != 2026:
         print(
             f"SKIP: Schedule year is {year}, "
-            f"but Dropbox root is {DROPBOX_YEAR_FOLDER}."
+            f"but Dropbox root is {year_folder}."
         )
         return None
 
@@ -310,7 +313,7 @@ def find_date_folder(
 
     month_folder = find_child_folder(
         dbx,
-        DROPBOX_YEAR_FOLDER,
+        year_folder,
         [month_name],
     )
 
@@ -535,7 +538,7 @@ def find_claimant_submission(
     return matches    
 
 def move_matches(dry_run=True):
-     """
+    """
     Match completed Dropbox screenshot submissions to Ongoing cases.
 
     For each Ongoing case, locate the matching Dropbox date, provider,
@@ -1001,10 +1004,8 @@ def move_matches(dry_run=True):
             "No Google Sheet rows were changed."
         )
 
-        print(
-            "\nTo perform the actual move, run "
-            "move_matches(dry_run=False)."
-        )
+        print("\nTo perform the actual move, run ")
+        print("python -m scripts.check_screenshot_to_finished --live")
 
         return
 

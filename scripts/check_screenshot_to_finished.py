@@ -1,9 +1,22 @@
+"""
+Run the screenshot matcher manually.
+
+From the repository root:
+
+Dry run:
+    python -m scripts.check_screenshot_to_finished
+
+Live run:
+    python -m scripts.check_screenshot_to_finished --live
+"""
+
 import argparse
 
 from app.screenshot_matcher import move_matches
 
 
 def main():
+    """Parse command-line options and run the screenshot matcher."""
     parser = argparse.ArgumentParser(
         description=(
             "Check Dropbox screenshots against Ongoing cases. "
