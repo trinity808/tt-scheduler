@@ -2,25 +2,20 @@
 Tests for app/ongoing_row_mapper.py: mapping extracted data to a row,
 where new cases land, and how duplicates are handled.
 
-Uses an in-memory FakeWorksheet instead of a real Google Sheet, and
-plain dictionaries shaped like pdf_extractor.py's output instead of
-real PDFs.
-
-What a fake can't catch: real Sheets behavior beyond what's imitated
-here. The append_row() column-shift bug, for example, came from how
-Sheets detects tables, which no fake reproduces. That's what the
-occasional live check against the sandbox sheet is for.
-
 Run from the project root:
     python -m pytest tests/test_ongoing_row_mapper.py -v
 """
 
+import pytest
 
+from app.case_metadata import decode_case_tests, read_all_case_tests
 from app.ongoing_row_mapper import (
     DUPLICATE_HIGHLIGHT_COLOR,
+    MetadataWriteError,
     add_or_update_case,
     build_ongoing_row,
 )
+from tests.fake_metadata import FakeMetadataClient
 from tests.fakes import FakeWorksheet
 
 
@@ -50,7 +45,6 @@ def extracted(case_id, name="Test Patient", total="484.00"):
 
 
 def case_row(case_id, provider="", psychometrist="", comments="", price="484.00"):
-    """A full sheet row for an existing case."""
     row = [""] * len(HEADERS)
     row[HEADERS.index("Case ID")] = case_id
     row[HEADERS.index("Patient Name")] = "Existing Patient"
@@ -62,7 +56,6 @@ def case_row(case_id, provider="", psychometrist="", comments="", price="484.00"
 
 
 def template_row():
-    """An empty row with only a template in its Comments cell."""
     row = [""] * len(HEADERS)
     row[HEADERS.index("Comments")] = TEMPLATE
     return row
@@ -118,8 +111,8 @@ def test_template_is_kept_on_the_row_the_case_lands_in():
     ws = FakeWorksheet([HEADERS, case_row("111"), template_row(), template_row()])
     add_or_update_case(ws, extracted("222"))
     assert ws.value(3, "Comments") == TEMPLATE
-    assert ws.value(3, "Price") == "484.00"  # extraction data still filled in
-    assert ws.value(4, "Case ID") == ""      # next template row untouched
+    assert ws.value(3, "Price") == "484.00"
+    assert ws.value(4, "Case ID") == ""
     assert ws.value(4, "Comments") == TEMPLATE
 
 
@@ -130,8 +123,6 @@ def test_gap_from_a_cleared_row_is_not_filled():
 
 
 def test_new_case_after_a_gap_starts_at_column_a():
-    # Regression test for the append_row() bug: a blank row in the
-    # data once shifted a new case so it started at the Provider column.
     ws = FakeWorksheet([HEADERS, case_row("111"), blank_row(), case_row("333")])
     add_or_update_case(ws, extracted("444", name="New Patient"))
     assert ws.rows[4][0] == "444"
@@ -152,7 +143,7 @@ def test_duplicate_updates_in_place_instead_of_adding():
     ws = FakeWorksheet([HEADERS, case_row("111"), case_row("222", price="250.00")])
     assert add_or_update_case(ws, extracted("222", total="484.00")) == ("updated", 3)
     assert ws.value(3, "Price") == "484.00"
-    assert len(ws.get_all_values()) == 3  # no new row
+    assert len(ws.get_all_values()) == 3
 
 
 def test_duplicate_keeps_manual_entry_fields():
@@ -177,3 +168,152 @@ def test_duplicate_row_is_highlighted_and_noted():
 def test_duplicate_match_ignores_surrounding_whitespace():
     ws = FakeWorksheet([HEADERS, case_row(" 222 ")])
     assert add_or_update_case(ws, extracted("222")) == ("updated", 2)
+
+
+# --- Storing a case's original tests --------------------------------
+
+
+def with_services(data, *codes):
+    """The same extraction, with the services list pdf_extractor produces."""
+    return {**data, "services": [{"code": c, "desc": f"{c} description"} for c in codes]}
+
+
+def stored_on(client, row_number):
+    values = client.values_on(row_number)
+    assert len(values) == 1, f"expected one entry on row {row_number}, found {len(values)}"
+    return decode_case_tests(values[0])
+
+
+def test_new_case_stores_its_original_tests_on_the_row_it_lands_in():
+    ws = FakeWorksheet([HEADERS, case_row("111")])
+    client = FakeMetadataClient()
+    data = with_services(extracted("222"), "96101-WISC-V", "90791")
+
+    assert add_or_update_case(ws, data, metadata=client) == ("added", 3)
+
+    stored = stored_on(client, 3)
+    assert stored.case_id == "222"
+    assert stored.tests == ["96101-WISC-V", "90791"]
+
+
+def test_only_codes_are_stored_not_descriptions():
+    ws = FakeWorksheet([HEADERS])
+    client = FakeMetadataClient()
+    add_or_update_case(ws, with_services(extracted("111"), "90791"), metadata=client)
+    assert "description" not in client.values_on(2)[0]
+
+
+def test_entry_follows_the_row_when_the_case_lands_on_a_template_row():
+    ws = FakeWorksheet([HEADERS, case_row("111"), template_row(), template_row()])
+    client = FakeMetadataClient()
+    add_or_update_case(ws, with_services(extracted("222"), "90791"), metadata=client)
+    assert stored_on(client, 3).case_id == "222"
+    assert client.values_on(4) == []
+
+
+def test_repeated_pdf_stores_the_tests_again_and_keeps_one_entry():
+    ws = FakeWorksheet([HEADERS])
+    client = FakeMetadataClient()
+    add_or_update_case(ws, with_services(extracted("111"), "90791"), metadata=client)
+
+    result = add_or_update_case(
+        ws, with_services(extracted("111"), "90791", "96130-AUTISM"), metadata=client
+    )
+
+    assert result == ("updated", 2)
+    assert stored_on(client, 2).tests == ["90791", "96130-AUTISM"]
+
+
+def test_stale_entry_on_a_hand_cleared_row_is_replaced():
+    ws = FakeWorksheet([HEADERS, case_row("111"), case_row("222")])
+    client = FakeMetadataClient()
+    add_or_update_case(ws, with_services(extracted("333"), "90791"), metadata=client)
+    # Row 4 is cleared by hand. Its entry stays behind, as real Sheets keeps it.
+    ws.rows[3] = blank_row()
+
+    add_or_update_case(ws, with_services(extracted("444"), "96130-AUTISM"), metadata=client)
+
+    assert stored_on(client, 4).case_id == "444"
+
+
+def test_other_cases_entries_are_left_alone():
+    ws = FakeWorksheet([HEADERS])
+    client = FakeMetadataClient()
+    add_or_update_case(ws, with_services(extracted("111"), "90791"), metadata=client)
+    add_or_update_case(ws, with_services(extracted("222"), "96130-AUTISM"), metadata=client)
+
+    stored = read_all_case_tests(client)
+    assert stored.by_row[2].case_id == "111"
+    assert stored.by_row[3].case_id == "222"
+
+
+def test_case_with_no_services_stores_an_empty_list():
+    ws = FakeWorksheet([HEADERS])
+    client = FakeMetadataClient()
+    add_or_update_case(ws, extracted("111"), metadata=client)  # no "services" key
+    assert stored_on(client, 2).tests == []
+
+
+def test_without_a_metadata_client_nothing_is_stored_and_nothing_changes():
+    ws = FakeWorksheet([HEADERS, case_row("111")])
+    assert add_or_update_case(ws, extracted("222")) == ("added", 3)
+    assert ws.value(3, "Case ID") == "222"
+
+
+# --- When storing fails ---------------------------------------------
+
+
+def test_failed_store_on_a_new_case_raises_but_the_row_is_written():
+    ws = FakeWorksheet([HEADERS])
+    client = FakeMetadataClient()
+    client.fail_create = True
+
+    with pytest.raises(MetadataWriteError) as caught:
+        add_or_update_case(ws, with_services(extracted("111"), "90791"), metadata=client)
+
+    assert ws.value(2, "Case ID") == "111"
+    assert caught.value.case_id == "111"
+    assert caught.value.action == "added"
+    assert caught.value.row_number == 2
+    assert "original tests couldn't be stored" in str(caught.value)
+    assert isinstance(caught.value.__cause__, RuntimeError)
+
+
+def test_failed_store_on_a_repeated_case_raises_but_the_row_is_still_updated():
+    ws = FakeWorksheet([HEADERS, case_row("111", price="250.00")])
+    client = FakeMetadataClient()
+    client.fail_create = True
+
+    with pytest.raises(MetadataWriteError) as caught:
+        add_or_update_case(
+            ws, with_services(extracted("111", total="484.00"), "90791"), metadata=client
+        )
+
+    assert caught.value.action == "updated"
+    assert ws.value(2, "Price") == "484.00"
+
+
+def test_a_retry_after_a_failed_store_leaves_one_entry():
+    ws = FakeWorksheet([HEADERS])
+    client = FakeMetadataClient()
+    data = with_services(extracted("111"), "90791")
+
+    client.fail_create = True
+    with pytest.raises(MetadataWriteError):
+        add_or_update_case(ws, data, metadata=client)
+
+    client.fail_create = False
+    assert add_or_update_case(ws, data, metadata=client) == ("updated", 2)
+    assert stored_on(client, 2).case_id == "111"
+
+
+@pytest.mark.parametrize("case_id", ["", "   "])
+def test_blank_case_id_with_metadata_raises_before_writing_anything(case_id):
+    ws = FakeWorksheet([HEADERS, case_row("111")])
+    client = FakeMetadataClient()
+
+    with pytest.raises(ValueError, match="Case ID is needed"):
+        add_or_update_case(ws, with_services(extracted(case_id), "90791"), metadata=client)
+
+    assert ws.writes == []
+    assert client.entries == []
