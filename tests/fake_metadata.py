@@ -15,12 +15,15 @@ class FakeMetadataClient:
         self.next_id = 1
         self.searches = 0
         self.fail_create = False
+        self.on_create = None   # optional callback, called with the row before each create
 
     def search(self, key):
         self.searches += 1
         return [e for e in self.entries if self.keys[e.metadata_id] == key]
 
     def create(self, row_number, key, value):
+        if self.on_create:
+            self.on_create(row_number)
         if self.fail_create:
             raise RuntimeError("API error")
         entry = MetadataEntry(self.next_id, row_number, value)

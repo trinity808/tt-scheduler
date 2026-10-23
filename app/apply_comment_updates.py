@@ -1,7 +1,7 @@
 """
 Sweeps the Ongoing tab, applying OA's daily comment updates
-(Provider, Psychometrist) to their respective columns, and flagging
-comments that need attention.
+(Provider, Psychometrist, and test changes) and flagging comments that
+need attention.
 
 Reads the whole tab in one call rather than one lookup per row,
 same reasoning as find_case_row() elsewhere in this codebase: avoids
@@ -17,29 +17,58 @@ repeatedly against the same unchanged comment, Provider and
 Psychometrist are only written if they'd actually change. Each run
 records what happened to each field (updated, or already set), so
 the console reports real changes rather than just what the comment
-says. Test changes (Add and Change) are resolved through the lookup when one
+says.
+
+Test changes (Add and Change) are resolved through the lookup when one
 is given, so unknown or ambiguous tests are flagged on the comment
-like any other problem. They are not applied to the sheet yet.
+like any other problem. They are applied to the Services Requested
+cell only when a metadata client is also given, because applying them
+needs each case's stored original tests (see case_metadata.py). Without
+one, they are reported but not applied, exactly as before. The rules for
+what the cell becomes live in services_update.py.
+
+A case's tests are looked at only when its comment has test changes or
+its cell already shows applied changes (a line ending in "(added)" or
+"(changed from ...)"). The second matters when OA clears or rewrites a
+comment: the changes it once asked for are still in the cell, so the
+case is checked and flagged instead of silently drifting. A comment
+that is empty and has no applied changes in the cell is skipped.
+
+When nothing is stored for a case and its cell is clean, the cell is
+adopted as the original. That original is saved BEFORE the cell is
+written, so a failed save leaves the cell alone. The other order could
+leave a changed cell with no original, which can never be repaired.
+
+Price is never touched.
 
 run_sweep() is the single entry point: it loads the Services tab,
 flags any problems on it, and sweeps the Ongoing tab with the lookup.
 
-Any parsed unrecognized_lines get flagged directly on the Comments
-cell (highlight + note), cleared automatically once the comment is
-fixed and reparses clean, since this reflects the comment's current
-state, not a one-time event.
+Anything worth attention is flagged directly on the Comments cell
+(highlight + note): the parser's unrecognized lines, and any problem
+applying tests. The flag is cleared automatically once the comment is
+fixed and everything applies cleanly, since it reflects the comment's
+current state, not a one-time event.
 """
 
 from dataclasses import dataclass
 
 from gspread.utils import rowcol_to_a1
 
+from app.case_metadata import (
+    original_tests_for_row,
+    read_all_case_tests,
+    set_case_tests,
+)
 from app.comment_parser import parse_comment
+from app.services_cell import parse_services_cell
 from app.services_tab import ServicesTab, flag_services_tab, load_services_tab
+from app.services_update import build_final_services
 from app.sheet_client import get_header_map, update_case_field
 
 
 ONGOING_TAB = "Ongoing"
+SERVICES_COLUMN = "Services Requested"
 
 
 # Orange, distinct from the yellow used to flag duplicate cases in
@@ -68,19 +97,75 @@ def flag_comment_issues(worksheet, cell, unrecognized_lines):
         worksheet.clear_note(cell)
 
 
-def apply_comment_updates(worksheet, lookup=None):
+def _services_outcome(status, update=None, detail=""):
+    """
+    What happened to a case's tests. status is one of:
+      not_applied        no metadata client, so test changes are only reported
+      no_column          the sheet has no Services Requested column
+      none               nothing to do for this case
+      unusable_original  a stored original exists but can't be trusted
+      refused            the cell can't be changed safely (see the update's flags)
+      store_failed       the original couldn't be saved, so the cell was left alone
+      unchanged          the cell already matches
+      updated            the cell was rewritten
+    """
+    return {"status": status, "update": update, "detail": detail}
+
+
+def _apply_services(
+    worksheet, row_number, case_id, changes, cell_text, lookup, metadata, stored
+):
+    """Applies one case's test changes. Returns (outcome, flags)."""
+    entry, problem = original_tests_for_row(stored, row_number, case_id)
+    if problem:
+        return (
+            _services_outcome("unusable_original", detail=problem),
+            [f"{SERVICES_COLUMN}  (not changed: {problem})"],
+        )
+
+    # No entry (and no problem) means nothing was stored for this case.
+    original = entry.tests if entry else None
+    update = build_final_services(original, changes, cell_text, lookup)
+    flags = list(update.flags)
+
+    if update.status == "refused":
+        return _services_outcome("refused", update), flags
+
+    # Save an adopted original first. If this fails the cell stays as it is.
+    if update.original_to_store is not None:
+        try:
+            set_case_tests(metadata, row_number, case_id, update.original_to_store)
+        except Exception as error:
+            flags.append(
+                f"{SERVICES_COLUMN}  (not changed: this case's original tests "
+                f"couldn't be saved: {error})"
+            )
+            return _services_outcome("store_failed", update, str(error)), flags
+
+    if update.status == "update":
+        update_case_field(worksheet, row_number, SERVICES_COLUMN, update.text)
+        return _services_outcome("updated", update), flags
+
+    return _services_outcome("unchanged", update), flags
+
+
+def apply_comment_updates(worksheet, lookup=None, metadata=None):
     """
     Reads every case row's Comments cell, parses it, applies
-    Provider/Psychometrist where present and changed, and flags the
-    Comments cell if the parse found anything worth attention.
+    Provider/Psychometrist where present and changed, applies test
+    changes to the Services Requested cell, and flags the Comments cell
+    if anything needs attention.
 
     `lookup` is a ServiceLookup (see service_lookup.py). With one,
     Add and Change lines are resolved to real test codes; without one,
     they're flagged as "services list not loaded". Provider and
     Psychometrist don't depend on it.
 
-    Returns a list of dicts, one per case row with a non-empty
-    comment:
+    `metadata` is a client for the hidden per-row storage (see
+    case_metadata.py). With one, test changes are applied to the
+    Services Requested cell. Without one, they're only reported.
+
+    Returns a list of dicts, one per case row that was looked at:
         {
             "case_id": "15419897",
             "parsed": ParsedComment(...),
@@ -88,8 +173,11 @@ def apply_comment_updates(worksheet, lookup=None):
                 "Provider": ("updated", old_value, new_value),
                 "Psychometrist": ("unchanged", old_value, new_value),
             },
+            "services": {"status": "updated", "update": ServicesUpdate, "detail": ""},
         }
     "fields" only contains fields the comment actually mentioned.
+    "services" says what happened to the case's tests; see
+    _services_outcome() for the statuses.
     """
     header_map = get_header_map(worksheet)
 
@@ -102,6 +190,10 @@ def apply_comment_updates(worksheet, lookup=None):
     case_id_idx = header_map["Case ID"] - 1
     provider_idx = header_map["Provider"] - 1
     psychometrist_idx = header_map["Psychometrist"] - 1
+    services_idx = header_map[SERVICES_COLUMN] - 1 if SERVICES_COLUMN in header_map else None
+
+    applying = metadata is not None and services_idx is not None
+    stored = read_all_case_tests(metadata) if applying else None
 
     results = []
 
@@ -111,7 +203,14 @@ def apply_comment_updates(worksheet, lookup=None):
             continue
 
         comment_text = row[comments_idx]
-        if not comment_text.strip():
+        cell_text = row[services_idx] if services_idx is not None and services_idx < len(row) else ""
+        has_applied_changes = applying and parse_services_cell(cell_text).has_markers()
+
+        # An empty comment is normally skipped. But when earlier test
+        # changes still show in the cell, the comment that asked for them
+        # is gone, so the case is looked at. To ignore those instead,
+        # delete the "and not has_applied_changes" part.
+        if not comment_text.strip() and not has_applied_changes:
             continue
 
         parsed = parse_comment(comment_text, lookup)
@@ -130,10 +229,30 @@ def apply_comment_updates(worksheet, lookup=None):
                 update_case_field(worksheet, row_number, field, new_value)
                 field_outcomes[field] = ("updated", old_value, new_value)
 
-        comments_cell = rowcol_to_a1(row_number, header_map["Comments"])
-        flag_comment_issues(worksheet, comments_cell, parsed.unrecognized_lines)
+        flags = list(parsed.unrecognized_lines)
 
-        results.append({"case_id": case_id, "parsed": parsed, "fields": field_outcomes})
+        if metadata is None:
+            services = _services_outcome("not_applied")
+        elif services_idx is None:
+            services = _services_outcome("no_column")
+        elif not parsed.service_changes and not has_applied_changes:
+            services = _services_outcome("none")
+        else:
+            services, services_flags = _apply_services(
+                worksheet, row_number, case_id, parsed.service_changes,
+                cell_text, lookup, metadata, stored,
+            )
+            flags += services_flags
+
+        comments_cell = rowcol_to_a1(row_number, header_map["Comments"])
+        flag_comment_issues(worksheet, comments_cell, flags)
+
+        results.append({
+            "case_id": case_id,
+            "parsed": parsed,
+            "fields": field_outcomes,
+            "services": services,
+        })
 
     return results
 
@@ -146,10 +265,13 @@ class SweepReport:
                            # "unchanged", "skipped" or "no_tab"
 
 
-def run_sweep(spreadsheet):
+def run_sweep(spreadsheet, metadata=None):
     """
     One full pass: load the Services tab, flag any problems on it, then
     sweep the Ongoing tab with the resulting lookup.
+
+    Pass a metadata client to apply test changes to the sheet. Without
+    one they are only reported.
 
     A Services tab that can't be used never stops the sweep. Provider
     and Psychometrist still apply, and test lines are flagged as
@@ -159,7 +281,7 @@ def run_sweep(spreadsheet):
     services = load_services_tab(spreadsheet)
     services_flag = flag_services_tab(services.worksheet, services.problems)
     results = apply_comment_updates(
-        spreadsheet.worksheet(ONGOING_TAB), services.lookup
+        spreadsheet.worksheet(ONGOING_TAB), services.lookup, metadata
     )
     return SweepReport(results=results, services=services, services_flag=services_flag)
 
