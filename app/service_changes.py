@@ -31,6 +31,13 @@ from dataclasses import dataclass, field
 from app.services_cell import ServiceLine
 
 
+def change_label(change):
+    """A change as OA would write it, using full codes: "Add: X" or "Change: X to Y"."""
+    if change.action == "add":
+        return f"Add: {change.code}"
+    return f"Change: {change.replaces} to {change.code}"
+
+
 @dataclass
 class SkippedChange:
     change: object  # a ServiceChange (see comment_parser.py)
@@ -39,12 +46,7 @@ class SkippedChange:
     @property
     def message(self):
         """The change and why it was skipped, in the form used for flags."""
-        change = self.change
-        if change.action == "add":
-            label = f"Add: {change.code}"
-        else:
-            label = f"Change: {change.replaces} to {change.code}"
-        return f"{label}  (skipped: {self.reason})"
+        return f"{change_label(self.change)}  (skipped: {self.reason})"
 
 
 @dataclass
