@@ -1,7 +1,7 @@
 import pdfplumber
 import re
 from datetime import datetime
-from app.service_format import SERVICE_CODE_PATTERN
+from app.service_format import SERVICE_CODE_PATTERN, SERVICE_SEPARATOR
 
 
 MONTHS = (
@@ -398,7 +398,7 @@ def extract_schedule_data(file_path, adult_age_cutoff=18):
         adult = ""
         child = ""
 
-    services_requested = "\n____________________\n".join(
+    services_requested = f"\n{SERVICE_SEPARATOR}\n".join(
         [
             f"{idx}. {service['code']} - {service['desc']}"
             for idx, service in enumerate(services, start=1)
