@@ -381,3 +381,97 @@ def test_run_sweep_without_a_metadata_client_does_not_apply_them():
     report = run_sweep(spreadsheet)
     assert ongoing.value(2, "Services Requested") == PDF_CELL
     assert report.results[0]["services"]["status"] == "not_applied"
+
+
+# --- Dry run --------------------------------------------------------
+
+
+def test_a_dry_run_writes_nothing_at_all():
+    ws = sheet(case_row("111", "Provider: Dr. Doe\nAdd: cars\nChange: ctoni to wais"))
+    client = client_with((2, "111", ORIGINAL))
+    entries_before = [(e.row_number, e.value) for e in client.entries]
+
+    apply_comment_updates(ws, LOOKUP, client, dry_run=True)
+
+    assert ws.writes == []
+    assert ws.notes == {}
+    assert ws.formats == {}
+    assert [(e.row_number, e.value) for e in client.entries] == entries_before
+
+
+def test_a_dry_run_still_reports_what_would_happen():
+    ws = sheet(case_row("111", "Provider: Dr. Doe\nAdd: cars"))
+    results = apply_comment_updates(ws, LOOKUP, client_with((2, "111", ORIGINAL)), dry_run=True)
+
+    assert results[0]["fields"]["Provider"] == ("updated", "", "Dr. Doe")
+    assert results[0]["services"]["status"] == "updated"
+    assert "(added)" in results[0]["services"]["update"].text
+    assert results[0]["flags"] == []
+
+
+def test_a_dry_run_works_out_the_flags_without_writing_them():
+    ws = sheet(case_row("111", "Change: ctoni to wais"))
+    results = apply_comment_updates(ws, LOOKUP, client_with((2, "111", ORIGINAL)), dry_run=True)
+
+    assert results[0]["flags"] == [
+        f"Change: {CTONI} to {WAIS}  (skipped: {CTONI} isn't on this case)"
+    ]
+    assert ws.notes == {}
+    assert ws.formats == {}
+
+
+def test_a_dry_run_does_not_save_an_adopted_original():
+    ws = sheet(case_row("111", "Add: cars"))
+    client = FakeMetadataClient()
+
+    results = apply_comment_updates(ws, LOOKUP, client, dry_run=True)
+
+    assert client.entries == []
+    assert results[0]["services"]["update"].original_to_store == ORIGINAL
+    assert results[0]["services"]["status"] == "updated"
+
+
+def test_a_dry_run_predicts_exactly_what_a_live_run_then_does():
+    comment = "Provider: Dr. Doe\nAdd: cars\nChange: wisc to wais\nChange: ctoni to wiat"
+    dry_ws, live_ws = sheet(case_row("111", comment)), sheet(case_row("111", comment))
+
+    dry = apply_comment_updates(dry_ws, LOOKUP, client_with((2, "111", ORIGINAL)), dry_run=True)
+    live = apply_comment_updates(live_ws, LOOKUP, client_with((2, "111", ORIGINAL)))
+
+    assert dry[0]["services"]["status"] == live[0]["services"]["status"] == "updated"
+    assert dry[0]["flags"] == live[0]["flags"]
+    assert dry[0]["fields"] == live[0]["fields"]
+    assert dry[0]["services"]["update"].text == live_ws.value(2, "Services Requested")
+
+
+def test_run_sweep_dry_run_notes_nothing_on_the_services_tab():
+    bad_rows = LOOKUP_ROWS + [["Beery VMI", "", ""]]
+    ongoing = sheet(case_row("111", "Add: cars"))
+    services = FakeWorksheet(bad_rows)
+    spreadsheet = FakeSpreadsheet({"Ongoing": ongoing, "Services": services})
+
+    report = run_sweep(spreadsheet, client_with((2, "111", ORIGINAL)), dry_run=True)
+
+    assert report.dry_run is True
+    assert report.services_flag == "dry_run"
+    assert report.services.problems
+    assert services.notes == {}
+    assert ongoing.writes == []
+
+
+def test_run_sweep_dry_run_with_no_services_tab_says_so():
+    ongoing = sheet(case_row("111", "Add: cars"))
+    report = run_sweep(FakeSpreadsheet({"Ongoing": ongoing}), None, dry_run=True)
+    assert report.services_flag == "no_tab"
+    assert report.dry_run is True
+
+
+def test_a_normal_run_is_not_marked_as_a_dry_run():
+    spreadsheet, _ = make_spreadsheet(case_row("111", "Add: cars"))
+    assert run_sweep(spreadsheet, client_with((2, "111", ORIGINAL))).dry_run is False
+
+
+def test_each_result_carries_what_the_cell_was_before():
+    ws = sheet(case_row("111", "Add: cars"))
+    results = sweep(ws, client_with((2, "111", ORIGINAL)))
+    assert [line.code for line in results[0]["services"]["before"]] == ORIGINAL

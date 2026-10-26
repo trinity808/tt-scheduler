@@ -44,6 +44,18 @@ Price is never touched.
 run_sweep() is the single entry point: it loads the Services tab,
 flags any problems on it, and sweeps the Ongoing tab with the lookup.
 
+With dry_run, everything is worked out and reported but nothing is
+written: no field, no Services Requested cell, no saved original, and
+no flag or note on any tab. The functions here write by default, since
+that is their job. The command line is the opposite: it previews unless
+told to write.
+
+Run from the command line:
+    python -m app.apply_comment_updates          preview, writes nothing
+    python -m app.apply_comment_updates --live   apply for real
+It pauses at the end ("Press Enter to close") only when run from an
+interactive terminal, so a scheduled run never waits for a key.
+
 Anything worth attention is flagged directly on the Comments cell
 (highlight + note): the parser's unrecognized lines, and any problem
 applying tests. The flag is cleared automatically once the comment is
@@ -51,6 +63,8 @@ fixed and everything applies cleanly, since it reflects the comment's
 current state, not a one-time event.
 """
 
+import argparse
+import sys
 from dataclasses import dataclass
 
 from gspread.utils import rowcol_to_a1
@@ -97,7 +111,7 @@ def flag_comment_issues(worksheet, cell, unrecognized_lines):
         worksheet.clear_note(cell)
 
 
-def _services_outcome(status, update=None, detail=""):
+def _services_outcome(status, update=None, detail="", before=None):
     """
     What happened to a case's tests. status is one of:
       not_applied        no metadata client, so test changes are only reported
@@ -107,13 +121,17 @@ def _services_outcome(status, update=None, detail=""):
       refused            the cell can't be changed safely (see the update's flags)
       store_failed       the original couldn't be saved, so the cell was left alone
       unchanged          the cell already matches
-      updated            the cell was rewritten
+      updated            the cell was rewritten (in a dry run: would be)
+
+    "before" is the cell's lines as they were, so a report can say what
+    this run changed and not only what the cell says now.
     """
-    return {"status": status, "update": update, "detail": detail}
+    return {"status": status, "update": update, "detail": detail, "before": before}
 
 
 def _apply_services(
-    worksheet, row_number, case_id, changes, cell_text, lookup, metadata, stored
+    worksheet, row_number, case_id, changes, cell_text, lookup, metadata, stored,
+    dry_run=False,
 ):
     """Applies one case's test changes. Returns (outcome, flags)."""
     entry, problem = original_tests_for_row(stored, row_number, case_id)
@@ -127,12 +145,13 @@ def _apply_services(
     original = entry.tests if entry else None
     update = build_final_services(original, changes, cell_text, lookup)
     flags = list(update.flags)
+    before = parse_services_cell(cell_text).lines
 
     if update.status == "refused":
-        return _services_outcome("refused", update), flags
+        return _services_outcome("refused", update, before=before), flags
 
     # Save an adopted original first. If this fails the cell stays as it is.
-    if update.original_to_store is not None:
+    if update.original_to_store is not None and not dry_run:
         try:
             set_case_tests(metadata, row_number, case_id, update.original_to_store)
         except Exception as error:
@@ -140,16 +159,17 @@ def _apply_services(
                 f"{SERVICES_COLUMN}  (not changed: this case's original tests "
                 f"couldn't be saved: {error})"
             )
-            return _services_outcome("store_failed", update, str(error)), flags
+            return _services_outcome("store_failed", update, str(error), before), flags
 
     if update.status == "update":
-        update_case_field(worksheet, row_number, SERVICES_COLUMN, update.text)
-        return _services_outcome("updated", update), flags
+        if not dry_run:
+            update_case_field(worksheet, row_number, SERVICES_COLUMN, update.text)
+        return _services_outcome("updated", update, before=before), flags
 
-    return _services_outcome("unchanged", update), flags
+    return _services_outcome("unchanged", update, before=before), flags
 
 
-def apply_comment_updates(worksheet, lookup=None, metadata=None):
+def apply_comment_updates(worksheet, lookup=None, metadata=None, dry_run=False):
     """
     Reads every case row's Comments cell, parses it, applies
     Provider/Psychometrist where present and changed, applies test
@@ -165,6 +185,9 @@ def apply_comment_updates(worksheet, lookup=None, metadata=None):
     case_metadata.py). With one, test changes are applied to the
     Services Requested cell. Without one, they're only reported.
 
+    With `dry_run`, nothing is written, but every outcome is worked out
+    and returned as if it had been. "updated" then means "would be".
+
     Returns a list of dicts, one per case row that was looked at:
         {
             "case_id": "15419897",
@@ -173,6 +196,7 @@ def apply_comment_updates(worksheet, lookup=None, metadata=None):
                 "Provider": ("updated", old_value, new_value),
                 "Psychometrist": ("unchanged", old_value, new_value),
             },
+            "flags": ["...everything flagged on the Comments cell, in order..."],
             "services": {"status": "updated", "update": ServicesUpdate, "detail": ""},
         }
     "fields" only contains fields the comment actually mentioned.
@@ -226,7 +250,8 @@ def apply_comment_updates(worksheet, lookup=None, metadata=None):
             if new_value == old_value:
                 field_outcomes[field] = ("unchanged", old_value, new_value)
             else:
-                update_case_field(worksheet, row_number, field, new_value)
+                if not dry_run:
+                    update_case_field(worksheet, row_number, field, new_value)
                 field_outcomes[field] = ("updated", old_value, new_value)
 
         flags = list(parsed.unrecognized_lines)
@@ -240,17 +265,19 @@ def apply_comment_updates(worksheet, lookup=None, metadata=None):
         else:
             services, services_flags = _apply_services(
                 worksheet, row_number, case_id, parsed.service_changes,
-                cell_text, lookup, metadata, stored,
+                cell_text, lookup, metadata, stored, dry_run,
             )
             flags += services_flags
 
-        comments_cell = rowcol_to_a1(row_number, header_map["Comments"])
-        flag_comment_issues(worksheet, comments_cell, flags)
+        if not dry_run:
+            comments_cell = rowcol_to_a1(row_number, header_map["Comments"])
+            flag_comment_issues(worksheet, comments_cell, flags)
 
         results.append({
             "case_id": case_id,
             "parsed": parsed,
             "fields": field_outcomes,
+            "flags": flags,
             "services": services,
         })
 
@@ -262,16 +289,19 @@ class SweepReport:
     results: list          # per-case results from apply_comment_updates()
     services: ServicesTab  # what loading the Services tab produced
     services_flag: str     # what flag_services_tab() did: "flagged", "cleared",
-                           # "unchanged", "skipped" or "no_tab"
+                           # "unchanged", "skipped" or "no_tab". In a dry run it
+                           # is "dry_run" (nothing was noted), or "no_tab".
+    dry_run: bool = False  # True if nothing was written
 
 
-def run_sweep(spreadsheet, metadata=None):
+def run_sweep(spreadsheet, metadata=None, dry_run=False):
     """
     One full pass: load the Services tab, flag any problems on it, then
     sweep the Ongoing tab with the resulting lookup.
 
     Pass a metadata client to apply test changes to the sheet. Without
-    one they are only reported.
+    one they are only reported. With dry_run, nothing is written
+    anywhere, the Services tab included.
 
     A Services tab that can't be used never stops the sweep. Provider
     and Psychometrist still apply, and test lines are flagged as
@@ -279,16 +309,58 @@ def run_sweep(spreadsheet, metadata=None):
     (WorksheetNotFound), since there's nothing to sweep.
     """
     services = load_services_tab(spreadsheet)
-    services_flag = flag_services_tab(services.worksheet, services.problems)
+    if dry_run:
+        services_flag = "no_tab" if services.worksheet is None else "dry_run"
+    else:
+        services_flag = flag_services_tab(services.worksheet, services.problems)
     results = apply_comment_updates(
-        spreadsheet.worksheet(ONGOING_TAB), services.lookup, metadata
+        spreadsheet.worksheet(ONGOING_TAB), services.lookup, metadata, dry_run
     )
-    return SweepReport(results=results, services=services, services_flag=services_flag)
+    return SweepReport(
+        results=results, services=services, services_flag=services_flag, dry_run=dry_run
+    )
+
+
+def main(argv=None, spreadsheet=None, metadata=None, pause=None):
+    """
+    The command line: sweep the Ongoing tab and print a report.
+
+    Previews by default, and writes only with --live. `spreadsheet` and
+    `metadata` are for tests; left out, they are the real ones. `pause`
+    decides whether to wait for Enter at the end, and by default waits
+    only when running in an interactive terminal.
+    """
+    parser = argparse.ArgumentParser(
+        description=(
+            "Apply OA's comments to the Ongoing tab. Previews what would "
+            "change by default."
+        )
+    )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Actually write the changes. Without this, nothing is written.",
+    )
+    args = parser.parse_args(argv)
+
+    if spreadsheet is None:
+        from app.sheet_client import get_client
+
+        spreadsheet = get_client()
+    if metadata is None:
+        from app.sheets_metadata_client import SheetsMetadataClient
+
+        metadata = SheetsMetadataClient(spreadsheet.worksheet(ONGOING_TAB))
+
+    from app.sweep_report import format_report
+
+    print(format_report(run_sweep(spreadsheet, metadata, dry_run=not args.live)))
+
+    if pause is None:
+        pause = sys.stdin.isatty()
+    if pause:
+        input("\nPress Enter to close...")
 
 
 if __name__ == "__main__":
-    from app.sheet_client import get_client
-    from app.sweep_report import format_report
-
-    print(format_report(run_sweep(get_client())))
-    input("\nPress Enter to close...")
+    main()
