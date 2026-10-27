@@ -243,8 +243,14 @@ def test_an_add_and_a_swap_in_one_run_are_both_listed():
 def test_a_rewrite_that_changes_no_test_says_so():
     after = [ServiceLine(WISC, "Wechsler"), line(PSYCH), line(AUTISM)]
     text = format_report(report([applied_result("111", "updated", ORIGINAL_LINES, after)]))
-    assert "descriptions or markers rewritten, no tests changed" in text
+    assert "Tests: cell rewritten (wording, markers or layout), no tests changed" in text
     assert "Tests updated:" not in text
+
+
+def test_a_preview_of_a_rewrite_that_changes_no_test_says_so():
+    after = [ServiceLine(WISC, "Wechsler"), line(PSYCH), line(AUTISM)]
+    text = format_report(dry_report([applied_result("111", "updated", ORIGINAL_LINES, after)]))
+    assert "Tests: cell would be rewritten (wording, markers or layout), no tests change" in text
 
 
 def test_a_case_that_is_already_up_to_date_says_so():
@@ -396,3 +402,48 @@ def test_a_preview_with_nothing_to_process_has_no_apply_command():
     assert text.startswith("DRY RUN")
     assert "No rows had a comment to process." in text
     assert APPLY_COMMAND not in text
+
+
+# --- The summary reads one fact per line ---------------------------
+
+
+def summary_report(dry_run):
+    after = ORIGINAL_LINES + [line(CARS, "added")]
+    results = [
+        applied_result("111", "updated", ORIGINAL_LINES, after, original_to_store=[WISC],
+                       fields={"Provider": ("updated", "", "Dr. Doe")}),
+        applied_result("222", "unchanged", flags=["Add: x  (skipped: y)"]),
+        outcome_only("333", "not_applied", service_changes=[ServiceChange("add", CARS)]),
+    ]
+    flag = "dry_run" if dry_run else "unchanged"
+    return SweepReport(
+        results=results, services=ServicesTab(problems=[]), services_flag=flag, dry_run=dry_run
+    )
+
+
+def test_each_part_of_the_summary_is_on_its_own_line():
+    lines = format_report(summary_report(dry_run=False)).splitlines()
+    assert "3 comment(s) processed, 1 field(s) updated, 1 flagged for attention." in lines
+    assert "1 test change(s) found, not applied to the sheet yet." in lines
+    assert "1 case(s) had their tests updated." in lines
+    assert "1 original list(s) saved." in lines
+    assert "Flagged cases: 222" in lines
+
+
+def test_a_preview_summary_also_reads_one_fact_per_line():
+    lines = format_report(summary_report(dry_run=True)).splitlines()
+    assert "3 comment(s) processed, 1 field(s) would be updated, 1 flagged for attention." in lines
+    assert "1 case(s) would have their tests updated." in lines
+    assert "1 original list(s) would be saved." in lines
+    assert f"To apply this for real, run: {APPLY_COMMAND}" in lines
+
+
+def test_the_summary_lines_are_together_and_in_order():
+    lines = format_report(summary_report(dry_run=False)).splitlines()
+    start = next(i for i, text in enumerate(lines) if "comment(s) processed" in text)
+    assert lines[start + 1:start + 5] == [
+        "1 test change(s) found, not applied to the sheet yet.",
+        "1 case(s) had their tests updated.",
+        "1 original list(s) saved.",
+        "Flagged cases: 222",
+    ]

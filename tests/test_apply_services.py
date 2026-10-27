@@ -475,3 +475,12 @@ def test_each_result_carries_what_the_cell_was_before():
     ws = sheet(case_row("111", "Add: cars"))
     results = sweep(ws, client_with((2, "111", ORIGINAL)))
     assert [line.code for line in results[0]["services"]["before"]] == ORIGINAL
+
+
+def test_a_hand_typed_line_is_explained_in_the_comments_note():
+    hand = PDF_CELL + "\n____________________\n4. 96130-CARS-2 - typed by hand"
+    ws = sheet(case_row("111", "Add: wiat", cell=hand))
+    sweep(ws, client_with((2, "111", ORIGINAL)))
+    note = ws.notes[COMMENTS_CELL]
+    assert "isn't in the PDF's list or this comment" in note
+    assert "earlier change" not in note

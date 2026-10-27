@@ -111,9 +111,9 @@ def _test_lines(result, dry_run):
             lines += [f"    {phrase}" for phrase in phrases]
         else:
             lines.append(
-                "  Tests: descriptions or markers would be rewritten, no tests change"
+                "  Tests: cell would be rewritten (wording, markers or layout), no tests change"
                 if dry_run
-                else "  Tests: descriptions or markers rewritten, no tests changed"
+                else "  Tests: cell rewritten (wording, markers or layout), no tests changed"
             )
     elif status == "unchanged" and parsed.service_changes and not _flags(result):
         lines.append("  Tests: already up to date, no change")
@@ -196,18 +196,23 @@ def format_report(report):
         if _flags(result):
             flagged.append(result["case_id"])
 
-    summary = (
+    summary_lines = [
         f"{len(report.results)} comment(s) processed, "
         f"{fields_updated} field(s) {'would be updated' if dry_run else 'updated'}, "
         f"{len(flagged)} flagged for attention."
-    )
+    ]
     if changes_found:
-        summary += f" {changes_found} test change(s) found, not applied to the sheet yet."
+        summary_lines.append(
+            f"{changes_found} test change(s) found, not applied to the sheet yet."
+        )
     if tests_updated:
-        summary += f" {tests_updated} case(s) {'would have' if dry_run else 'had'} their tests updated."
+        summary_lines.append(
+            f"{tests_updated} case(s) {'would have' if dry_run else 'had'} their tests updated."
+        )
     if originals_saved:
-        summary += f" {originals_saved} original list(s) {'would be saved' if dry_run else 'saved'}."
-    summary_lines = [summary]
+        summary_lines.append(
+            f"{originals_saved} original list(s) {'would be saved' if dry_run else 'saved'}."
+        )
     if flagged:
         summary_lines.append("Flagged cases: " + ", ".join(flagged))
     if dry_run:
