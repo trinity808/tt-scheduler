@@ -53,8 +53,13 @@ told to write.
 Run from the command line:
     python -m app.apply_comment_updates          preview, writes nothing
     python -m app.apply_comment_updates --live   apply for real
-It pauses at the end ("Press Enter to close") only when run from an
-interactive terminal, so a scheduled run never waits for a key.
+    add --pause to wait for Enter at the end ("Press Enter to close"),
+    for a double-clicked shortcut whose window would otherwise vanish.
+It never waits unless --pause is given. Whether standard input "is a
+terminal" can't be trusted to decide this: on Windows an empty input
+counts as one, and so does the console a scheduled task is given. A
+scheduled run must not use --pause. Even with it, a closed or empty
+input is ignored and doesn't crash the run.
 
 Anything worth attention is flagged directly on the Comments cell
 (highlight + note): the parser's unrecognized lines, and any problem
@@ -64,7 +69,6 @@ current state, not a one-time event.
 """
 
 import argparse
-import sys
 from dataclasses import dataclass
 
 from gspread.utils import rowcol_to_a1
@@ -327,8 +331,8 @@ def main(argv=None, spreadsheet=None, metadata=None, pause=None):
 
     Previews by default, and writes only with --live. `spreadsheet` and
     `metadata` are for tests; left out, they are the real ones. `pause`
-    decides whether to wait for Enter at the end, and by default waits
-    only when running in an interactive terminal.
+    decides whether to wait for Enter at the end; left out, it follows the
+    --pause flag, which is off unless given.
     """
     parser = argparse.ArgumentParser(
         description=(
@@ -340,6 +344,11 @@ def main(argv=None, spreadsheet=None, metadata=None, pause=None):
         "--live",
         action="store_true",
         help="Actually write the changes. Without this, nothing is written.",
+    )
+    parser.add_argument(
+        "--pause",
+        action="store_true",
+        help="Wait for Enter before closing, so a double-clicked window stays open.",
     )
     args = parser.parse_args(argv)
 
@@ -357,9 +366,12 @@ def main(argv=None, spreadsheet=None, metadata=None, pause=None):
     print(format_report(run_sweep(spreadsheet, metadata, dry_run=not args.live)))
 
     if pause is None:
-        pause = sys.stdin.isatty()
+        pause = args.pause
     if pause:
-        input("\nPress Enter to close...")
+        try:
+            input("\nPress Enter to close...")
+        except EOFError:
+            pass  # nothing to read from (closed or empty input): just finish
 
 
 if __name__ == "__main__":

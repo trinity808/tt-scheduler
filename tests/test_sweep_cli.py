@@ -124,29 +124,48 @@ def typed(monkeypatch):
     return prompts
 
 
-def test_it_does_not_wait_when_nobody_is_at_a_terminal(monkeypatch, typed):
-    monkeypatch.setattr("sys.stdin", Terminal(False))
+def test_it_never_waits_unless_asked(typed):
     spreadsheet, _, client = setup()
     main([], spreadsheet=spreadsheet, metadata=client)
+    main(["--live"], spreadsheet=spreadsheet, metadata=client)
     assert typed == []
 
 
-def test_it_waits_for_a_key_when_someone_is_at_a_terminal(monkeypatch, typed):
+def test_it_does_not_wait_even_when_standard_input_claims_to_be_a_terminal(monkeypatch, typed):
+    # On Windows an empty input and a scheduled task's console both look like
+    # a terminal, so that can't decide whether to wait.
     monkeypatch.setattr("sys.stdin", Terminal(True))
     spreadsheet, _, client = setup()
-    main([], spreadsheet=spreadsheet, metadata=client)
+    main(["--live"], spreadsheet=spreadsheet, metadata=client)
+    assert typed == []
+
+
+def test_pause_waits_for_a_key(typed):
+    spreadsheet, _, client = setup()
+    main(["--pause"], spreadsheet=spreadsheet, metadata=client)
     assert len(typed) == 1
     assert "Press Enter to close" in typed[0]
 
 
-def test_the_pause_can_be_forced_either_way(monkeypatch, typed):
-    monkeypatch.setattr("sys.stdin", Terminal(False))
+def test_pause_with_nothing_to_read_from_just_finishes(monkeypatch, capsys):
+    def no_input(prompt=""):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", no_input)
+    spreadsheet, ongoing, client = setup()
+
+    main(["--live", "--pause"], spreadsheet=spreadsheet, metadata=client)
+
+    assert "Provider: set to Dr. Doe" in capsys.readouterr().out
+    assert ongoing.value(2, "Provider") == "Dr. Doe"
+
+
+def test_the_pause_can_be_forced_either_way(typed):
     spreadsheet, _, client = setup()
     main([], spreadsheet=spreadsheet, metadata=client, pause=True)
     assert len(typed) == 1
 
-    monkeypatch.setattr("sys.stdin", Terminal(True))
-    main([], spreadsheet=spreadsheet, metadata=client, pause=False)
+    main(["--pause"], spreadsheet=spreadsheet, metadata=client, pause=False)
     assert len(typed) == 1
 
 
