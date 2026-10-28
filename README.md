@@ -579,7 +579,7 @@ For each case on the Ongoing tab, it:
 1. Reads the date in the `Date & Time` column and finds that day's folder in Dropbox.
 2. Finds the provider's folder inside it, using the `Provider` column.
 3. Finds the claimant's folder inside that, named from the `Patient Name` column in the form `LastNameFirstName`. "Anand Khanna" becomes `KhannaAnand`.
-4. Checks that the claimant's folder contains a screenshot.
+4. Checks that the claimant's folder, or any folder inside it, contains an image.
 5. Takes the screenshot's last-modified time on Dropbox, converts it from UTC to Arizona time, and uses it as `Date Completed`.
 6. Moves the case to Finished, the same way `python -m app.sheet_case_mover` does.
 
@@ -593,7 +593,8 @@ A case can only match when its `Provider` column is filled in. The sweep fills i
     MM-DD-YYYY/                 for example 09-21-2026
       <Provider>/               for example Dr. Doe
         <LastNameFirstName>/    for example KhannaAnand
-          <screenshot>          an image: .png, .jpg, .jpeg, .heic or .webp
+          <screenshot>          an image anywhere inside this folder, subfolders included
+                                (.png, .jpg, .jpeg, .heic or .webp)
 ```
 
 Months and days are zero-padded. Names are compared after ignoring capitalization, spaces, hyphens, underscores, apostrophes, commas, and other punctuation, so `Khanna, Anand` and `KhannaAnand` are the same name, and `Dr. Doe` matches `dr doe`. Beyond that the match is exact, never fuzzy.
@@ -614,7 +615,7 @@ It needs `DROPBOX_YEAR_FOLDER` in `.env`, and the `tzdata` package, which is in 
 It skips a case and says why, instead of guessing, when:
 
 - the date folder, the provider folder, or the claimant folder isn't found
-- - the claimant's folder has no image file (`.png`, `.jpg`, `.jpeg`, `.heic` or `.webp`), which is normal for a provider who hasn't submitted yet. Any other file type doesn't count
+- the claimant's folder has no image file anywhere inside it (`.png`, `.jpg`, `.jpeg`, `.heic` or `.webp`), which is normal for a provider who hasn't submitted yet. Any other file type doesn't count
 - more than one claimant folder matches, in which case it prints the candidates
 - the scheduled year isn't 2026 (see the limits below)
 
@@ -630,6 +631,7 @@ It is the screenshot's last-modified time on Dropbox, not the time the move ran,
 - Skipped cases are reported only on the console. A case with a misspelled provider or folder name just stays in Ongoing.
 - Its name matching has no automated tests yet, so the preview is the check.
 - If a move fails after the case is written to Finished but before it is deleted from Ongoing, running it again can add the case to Finished a second time.
+- Any image file in the claimant's folder counts as a submission. It can't tell a real screenshot from a stray photo, and the file's name isn't checked.
 
 ## Testing
 
