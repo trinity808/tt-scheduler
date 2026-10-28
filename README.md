@@ -34,8 +34,8 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 
 - Adds each extracted case as a row on the sheet's `Ongoing` tab. A repeated PDF updates that row in place and flags it as a duplicate.
 - Reads OA's notes in the Comments column (`Provider:`, `Psychometrist:`, `Add:`, `Change:`) and fills in the Provider and Psychometrist columns.
-- Resolves short test names such as `wms` or `wisc` into full service codes through a `Services` tab. Unknown or ambiguous names are flagged. Test changes are recognized and reported, but not yet written to the sheet.
-- Flags problems directly on the sheet, with a note and, for cases, a colored cell, and prints a plain-language report after each run.
+- Resolves short test names such as `wms` or `wisc` into full service codes through a `Services` tab, and applies `Add:` and `Change:` lines to the case's Services Requested cell, marking each added or swapped test. Unknown or ambiguous names, and changes that don't fit the case, are flagged.
+- Flags problems directly on the sheet, with a note and, for cases, a colored cell, and prints a plain-language report after each run. The sweep previews by default and only writes with `--live`.
 - Moves a finished case from the `Ongoing` tab to the `Finished` tab.
 - Finds the screenshot a provider has submitted for each open case in Dropbox, and moves the case to the `Finished` tab with the screenshot's time as its completion date. This is a separate command and previews by default.
 - Saves each case's original list of tests as hidden data on its row when the case is added.
@@ -48,7 +48,7 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 │   ├── dropbox_api.py            # Dropbox auth and file operations
 │   └── dropbox_metadata.py       # When Dropbox received a file (server time, UTC)
 ├── app/
-│   ├── apply_comment_updates.py  # The sweep: applies OA's comments to the Ongoing tab (run_sweep)
+│   ├── apply_comment_updates.py  # The sweep: applies OA's comments, test changes included, to the Ongoing tab (run_sweep, and the command line)
 │   ├── case_metadata.py          # Saves each case's original test list as hidden data on its row (the rules)
 │   ├── comment_parser.py         # Parses the Comments column format
 │   ├── config_loader.py          # Loads config/settings.json
@@ -58,9 +58,12 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 │   ├── pdf_extractor.py          # PDF parsing and data extraction
 │   ├── schedule_generator.py     # Daily schedule DOCX creation/update
 │   ├── screenshot_matcher.py     # Finds a provider's submitted screenshot in Dropbox and moves the case to Finished
+│   ├── service_changes.py        # Applies a comment's test changes to a case's original tests, in order
 │   ├── service_format.py         # The shared pattern for a service code
 │   ├── service_lookup.py         # Turns typed test names into service codes
+│   ├── services_cell.py          # Reads and writes the Services Requested cell's text and markers
 │   ├── services_tab.py           # Loads the Services tab and flags problems on it
+│   ├── services_update.py        # Decides what the cell should become, and when not to touch it
 │   ├── sheet_case_mover.py       # Moves a case from Ongoing to Finished
 │   ├── sheet_client.py           # Google Sheets connection and cell helpers
 │   ├── sheets_metadata_client.py # The Google Sheets calls behind case_metadata.py
@@ -70,6 +73,7 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 ├── config/
 │   └── settings.json             # Runtime folders and scheduler settings
 ├── docs/
+│   ├── manual_check_apply_test_changes.md  # Step-by-step checks to run after changing the sweep
 │   └── trinity_scheduler_process_guide.pdf
 ├── scripts/
 │   ├── check_case_metadata.py    # Live check of the stored original lists, on a scratch tab
@@ -317,7 +321,7 @@ launchctl list | grep trinity
 
 ## Scheduling on Windows
 
-Windows Task Scheduler can run the DOCX pipeline (`main.py`) on a repeating schedule. This schedules the pipeline only. The sheet tracking is not scheduled yet.
+Windows Task Scheduler can run the DOCX pipeline (`main.py`) on a repeating schedule. This schedules the pipeline only. See "Scheduling the sweep" at the end of this section for the sheet.
 
 1. Open Task Scheduler and choose **Create Task**. Use this, not the Basic Task wizard, which hides settings you need.
 2. **General:** give it a name. "Run only when user is logged on" is the option this has been tested with.
@@ -339,6 +343,24 @@ Mistakes made while setting this up, and what each looks like:
 - **Dropbox folder paths in `.env` that don't match the app's access type.** The run starts but fails at its first Dropbox call with a `not_found` error in `logs/scheduler_error.log`. See [Dropbox folder paths](#dropbox-folder-paths).
 
 Not tested: "Run whether user is logged on or not", running while the computer is asleep, and the wake-the-computer option.
+
+### Scheduling the sweep
+ 
+The sweep (`python -m app.apply_comment_updates`) can be scheduled the same way, with different fields in the action. This has not been tried yet.
+ 
+- **Program/script:** the full path to the virtual environment's Python, as above
+- **Add arguments:** `-m app.apply_comment_updates --live`
+- **Start in:** the project root, which `-m` needs to find `app/`
+ 
+Two rules. Never add `--pause`, which makes the run wait for a key nobody will press. And the arguments must include `--live`, since without it the command only previews and writes nothing.
+ 
+Before scheduling it:
+ 
+- **Its report is only printed.** The sweep doesn't use the logger, so a scheduled run's report would be lost. Fix that first (see Known gaps), or the scheduled runs can't be checked.
+- **Run it by hand first,** as a preview and then with `--live`, against the sheet it will run on.
+- **It is safe to repeat.** A rerun on an unchanged sheet writes nothing, so the interval can be short. How often OA's comments should be picked up is still to be decided.
+ 
+The screenshot matcher is not scheduled either. If it is, the same two rules apply to `-m scripts.check_screenshot_to_finished --live`.
 
 ## Processing Flow
 
@@ -383,6 +405,8 @@ The Python logger writes the first two itself, in rotating files with a 2 MB lim
 
 Only logger output reaches these files. Some low-level messages in `apis/dropbox_api.py`, such as the upload and move confirmations, are plain `print` calls. They appear on the console but not in the log, and the run's own log lines already record the same steps. The macOS shell script also appends the console output to the same files, which has not been tested.
 
+The sweep and the screenshot matcher don't use this logger. They print their reports to the console, so nothing about their runs reaches `logs/`. That is fine when someone runs them by hand. For a scheduled run it means the report is lost. This is listed under Known gaps.
+
 When email alerts are enabled in `config/settings.json`, a failed PDF or a fatal run failure sends an email using the SMTP values in `.env`. They are off by default. The SMTP settings use a plain username and password, so a Gmail account needs an app password. Microsoft 365 mailboxes no longer accept that kind of login and would need a different approach.
 
 ## Tracking Sheet
@@ -416,13 +440,13 @@ The code finds columns by their header name, not their position, so columns can 
 
 | Tab | Headers the code needs |
 |---|---|
-| Ongoing | `Case ID` everywhere. `Provider`, `Psychometrist`, and `Comments` for the sweep. The other headers are filled from the PDF if present and left blank if not. |
+| Ongoing | `Case ID` everywhere. `Provider`, `Psychometrist`, and `Comments` for the sweep. `Services Requested` for applying test changes (without it the sweep still runs, and says test changes can't be applied). The other headers are filled from the PDF if present and left blank if not. |
 | Finished | `Case ID`. Any header that also exists in Ongoing is copied across. `Payment Status` and `Date Completed` are filled only by whatever moves the case, and are blank otherwise. |
-| Services | `Code` and `Aliases`. `Name` and `Price` are for people and are not read. |
+| Services | `Code` and `Aliases`. `Name` is read too, as the description on lines the sweep adds, and may be blank. `Price` is not read. |
 
 These columns are a draft and may change. If you rename or remove one, search the repository for the header's name to find what uses it, for example `git grep -n "Payment Status"`.
 
-Who fills what on the Ongoing tab: everything up to `Allegations`, plus `Price`, comes from the PDF. `Psychometrist` and `Provider` are filled by the sweep from the Comments column. `Comments` is written by OA. `Price` is the total printed on the PDF. Final billed amounts are set separately on the billing request forms and are not tracked here.
+Who fills what on the Ongoing tab: everything up to `Allegations`, plus `Price`, comes from the PDF. `Services Requested` also comes from the PDF, and the sweep adds to it when OA's comment asks for test changes. `Psychometrist` and `Provider` are filled by the sweep from the Comments column. `Comments` is written by OA. `Price` is the total printed on the PDF. Final billed amounts are set separately on the billing request forms and are not tracked here, and the sweep never changes `Price`.
 
 ### Adding a case
 
@@ -747,7 +771,7 @@ python -m pytest -v
 
 Use `python -m pytest`, not plain `pytest`, so the project root is on the import path.
 
-The tests run in memory. They need no Dropbox or Google credentials, because the Google Sheets code takes the sheet as a parameter and the tests hand it a stand-in from `tests/fakes.py`. They cover the comment parser, the Services lookup and its tab, the sweep, adding and moving cases, the console report, the schedule sort, and the PDF pipeline.
+The tests run in memory. They need no Dropbox or Google credentials, because the Google Sheets code takes the sheet as a parameter and the tests hand it a stand-in from `tests/fakes.py`. They cover the comment parser, the Services lookup and its tab, reading and writing the Services Requested cell, applying test changes, the sweep and its preview mode, adding and moving cases, the console report, the sweep's command line, the schedule sort, and the PDF pipeline.
 
 `tests/test_local_pipeline.py` runs the real extraction and report code against sample PDFs. It needs the local-only `templates/` and `testing pdfs/` folders and skips itself, with a reason, when they are missing.
 
@@ -785,14 +809,23 @@ python -c "from app.pdf_extractor import extract_schedule_data as e; [print(k, v
 ```
 
 ### Trying the sheet by hand
-
+ 
 Use your own sandbox sheet, never the production one.
-
+ 
 1. Add a case: `python -m app.ongoing_row_mapper`, with a sample PDF.
-2. Type a note in that case's Comments cell, for example `Provider: Dr. Doe`.
-3. Run the sweep: `python -m app.apply_comment_updates`.
-4. Check the Provider column and read the report.
-5. Make a deliberate typo in the comment, such as `Provder:`, and run the sweep again. The Comments cell should turn orange with a note that suggests the right spelling.
+2. Type a note in that case's Comments cell, for example:
+ 
+```text
+Provider: Dr. Doe
+Add: wms
+```
+ 
+3. Preview the sweep: `python -m app.apply_comment_updates`. It writes nothing. Read the report, and check that the sheet didn't change.
+4. Apply it: `python -m app.apply_comment_updates --live`. The Provider column is filled, the Services Requested cell has a new last line ending in `(added)`, and the Comments cell is not orange.
+5. Run `--live` again. It should write nothing and say `Tests: already up to date, no change`.
+6. Make a deliberate typo in the comment, such as `Provder:`, and run the sweep again. The Comments cell should turn orange with a note that suggests the right spelling.
+ 
+For the full set of checks after a change to the sweep, including rewritten and cleared comments, rows that move, and cases that can't be updated, follow [docs/manual_check_apply_test_changes.md](docs/manual_check_apply_test_changes.md).
 
 ## Troubleshooting
 
@@ -872,6 +905,31 @@ The tab must be named exactly `Services`. The sweep still runs without it, and f
 
 See [Flags on the sheet](#flags-on-the-sheet) for what each one means and how to clear it.
 
+**The sweep ran but nothing changed**
+ 
+The command previews by default, and the report starts with `DRY RUN`. Run it again with `--live`.
+ 
+**`Test changes can't be applied: the Ongoing tab has no 'Services Requested' column`**
+ 
+The Ongoing tab needs a `Services Requested` header to apply test changes. It was probably renamed or removed. See [Tabs and columns](#tabs-and-columns). Provider and Psychometrist still apply.
+ 
+**A test in a comment isn't being added or swapped**
+ 
+Check these, in order:
+ 
+1. The line is in `Add:` or `Change: X to Y` form, and the case's row has a Case ID.
+2. The Comments cell is orange. If so, its note says why: an unknown name, a change that doesn't fit the case, or `not changed`.
+3. The report doesn't say the Services tab couldn't be loaded.
+4. The sweep was run with `--live`.
+ 
+**`Services Requested  (not changed: ...)` in a Comments note**
+ 
+The sweep deliberately left that case's tests alone. The reason follows `not changed`, and [Flags on the sheet](#flags-on-the-sheet) lists each one: a line in the cell that can't be read, original tests that weren't saved while the cell already shows changes, a case with no tests recorded, a saved original that belongs to a different case, or a save that failed.
+ 
+**A test deleted from the comment is still in the cell**
+ 
+That's deliberate. Tests are only ever added or swapped, so a deleted line keeps its test and flags the comment. Put the line back to keep it, or delete the test's line from the cell to remove it.
+
 ## Security
 
 This repository is public. Treat everything committed to it as visible to anyone, permanently.
@@ -901,16 +959,19 @@ Use your own Dropbox app and your own copy of the sheet while developing. Produc
 - If the schedule table changes, update the headers and row generation in `app/schedule_generator.py`.
 - If template placeholders change, update the replacements in `app/template_filler.py`.
 - The Services tab can be edited with no code change. Add rows and aliases there.
+- Fill the Services tab's `Name` column with the text a PDF prints after the code, copied from a real PDF, for the tests OA is likely to add. It becomes the description on lines the sweep adds.
+- If you change how test changes are applied (the markers, the refusal rules, or the wording of a flag), update the tests, "How test changes are applied", "Flags on the sheet", and `docs/manual_check_apply_test_changes.md` together.
 - Test editions change over time, and a mismatch is the first thing to check when a test isn't recognized. Trinity Tree gives the current edition of a test even when a referral lists an older one, so a PDF can show an older code than the test actually given. How newer editions should appear in the Services tab is still being decided.
 - The sheet layout is a draft. Check [Tabs and columns](#tabs-and-columns) before renaming a header.
 
 **Known gaps**
-
+ 
 - The DOCX pipeline and the sheet are not connected. Cases are added to the sheet by hand.
-- Test changes are checked but not written into the sheet.
-- A flagged comment whose text is deleted entirely keeps its orange fill and note.
-- The sweep ends with a "Press Enter to close" prompt, which would hang a scheduled run.
+- The sweep and the screenshot matcher print their reports to the console only. Nothing is logged, so a scheduled run's report would be lost. This needs fixing before either is scheduled.
+- A flagged comment that is deleted entirely, when nothing has been applied to the case, keeps its orange fill and note.
 - A PDF whose case ID can't be read is written to the sheet as a row with a blank Case ID.
+- A move to Finished writes the case there before deleting it from Ongoing, so if it fails in between and is run again, the case can be added to Finished twice.
+- The screenshot matcher's own limits are listed in its section.
 
 ### Contributing
 
