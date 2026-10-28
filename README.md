@@ -627,12 +627,11 @@ It is the screenshot's last-modified time on Dropbox, not the time the move ran,
 
 ### Known limits
 
-- It only handles 2026. A case scheduled in any other year is skipped, because the year is written into the code.
+- It only handles 2026: a case scheduled in any other year is skipped, because the year is written into the code and `DROPBOX_YEAR_FOLDER` points at a single year's folder. Cases outlive their year (a December exam can be submitted in January), so both years' folders will need to be reachable at once. How to do that depends on what the app can see in production, and is still to be decided.
 - Skipped cases are reported only on the console. A case with a misspelled provider or folder name just stays in Ongoing.
 - Its name matching has no automated tests yet, so the preview is the check.
 - If a move fails after the case is written to Finished but before it is deleted from Ongoing, running it again can add the case to Finished a second time.
-- Any image file in the claimant's folder counts as a submission. It can't tell a real screenshot from a stray photo, and the file's name isn't checked.
-- With several images in one claimant folder it picks the first by file path in alphabetical order, not by time, so Date Completed can come from any of them. Which one it should use is a team decision, tied to the question of first upload versus last modified.
+- Any image file in the claimant's folder counts as a submission, and its name isn't checked, because screenshot names vary by device. In practice the folder holds only the screenshot, so several images should be rare. If there are several, it picks the first by file path in alphabetical order, which is arbitrary, so Date Completed could come from any of them. Treating several images as ambiguous, as it does for several matching folders, is a possible change.
 
 ## Testing
 
