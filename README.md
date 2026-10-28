@@ -37,6 +37,8 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 - Resolves short test names such as `wms` or `wisc` into full service codes through a `Services` tab. Unknown or ambiguous names are flagged. Test changes are recognized and reported, but not yet written to the sheet.
 - Flags problems directly on the sheet, with a note and, for cases, a colored cell, and prints a plain-language report after each run.
 - Moves a finished case from the `Ongoing` tab to the `Finished` tab.
+- Finds the screenshot a provider has submitted for each open case in Dropbox, and moves the case to the `Finished` tab with the screenshot's time as its completion date. This is a separate command and previews by default.
+- Saves each case's original list of tests as hidden data on its row when the case is added.
 
 ## Project Structure
 
@@ -47,6 +49,7 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 │   └── dropbox_metadata.py       # When Dropbox received a file (server time, UTC)
 ├── app/
 │   ├── apply_comment_updates.py  # The sweep: applies OA's comments to the Ongoing tab (run_sweep)
+│   ├── case_metadata.py          # Saves each case's original test list as hidden data on its row (the rules)
 │   ├── comment_parser.py         # Parses the Comments column format
 │   ├── config_loader.py          # Loads config/settings.json
 │   ├── file_utils.py             # Unused, kept from the original project
@@ -54,11 +57,13 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 │   ├── ongoing_row_mapper.py     # Maps an extracted PDF to an Ongoing row, adds or updates it
 │   ├── pdf_extractor.py          # PDF parsing and data extraction
 │   ├── schedule_generator.py     # Daily schedule DOCX creation/update
+│   ├── screenshot_matcher.py     # Finds a provider's submitted screenshot in Dropbox and moves the case to Finished
 │   ├── service_format.py         # The shared pattern for a service code
 │   ├── service_lookup.py         # Turns typed test names into service codes
 │   ├── services_tab.py           # Loads the Services tab and flags problems on it
 │   ├── sheet_case_mover.py       # Moves a case from Ongoing to Finished
 │   ├── sheet_client.py           # Google Sheets connection and cell helpers
+│   ├── sheets_metadata_client.py # The Google Sheets calls behind case_metadata.py
 │   ├── state_manager.py          # Unused, kept from the original project
 │   ├── sweep_report.py           # Plain-language console report for a sweep
 │   └── template_filler.py        # Report template placeholder replacement
@@ -67,6 +72,8 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 ├── docs/
 │   └── trinity_scheduler_process_guide.pdf
 ├── scripts/
+│   ├── check_case_metadata.py    # Live check of the stored original lists, on a scratch tab
+│   ├── check_screenshot_to_finished.py # Runs the screenshot matcher (preview by default)
 │   └── check_sheet_connection.py # Live check against your own sandbox sheet
 ├── templates/                    # Local only, not in the repository (see below)
 ├── testing pdfs/                 # Local only, not in the repository (see below)
@@ -148,6 +155,7 @@ copy .env.example .env        # PowerShell
 | `DROPBOX_INPUT_FOLDER`, `DROPBOX_PROCESSED_PDF_FOLDER`, `DROPBOX_SCHEDULE_FOLDER` | The Dropbox folders the DOCX pipeline reads from and writes to | `main.py` |
 | `GOOGLE_SHEETS_ID` | The ID in your sheet's URL, between `/d/` and `/edit` | The tracking sheet |
 | `GOOGLE_SERVICE_ACCOUNT_FILE` | Path to the service account key, `config/service_account.json` by default | The tracking sheet |
+| `DROPBOX_YEAR_FOLDER` | The Dropbox folder that holds the year's month folders, such as `/2026`, written the way the folder paths below are | The screenshot matcher (see [Screenshot Matcher](#screenshot-matcher)) |
 | `SMTP_*`, `ALERT_TO_EMAIL` | Optional failure emails | Only when `email_notifications_enabled` is `true` in `config/settings.json` |
 
 The SMTP settings use a plain username and password, which works with providers such as Gmail (with an app password). It does not work with Microsoft 365 mailboxes, which no longer accept that login.
@@ -160,6 +168,8 @@ The three folder variables are personal to your Dropbox app, which is why they l
 - **Full Dropbox access:** full paths from the root of the account. For example `/Apps/<your app name>/incoming_pdfs`.
 
 If one is missing, the startup check stops the run with a message naming it.
+
+`DROPBOX_YEAR_FOLDER` follows the same path rules. It is used only by the screenshot matcher, and it is checked when the matcher looks for a date folder, so the startup check doesn't mention it.
 
 ### Google Sheets setup
 
@@ -183,7 +193,7 @@ It prints the tabs it found and each tab's headers.
 1. Create a Dropbox app in the [Dropbox App Console](https://www.dropbox.com/developers/apps/create) with **Scoped access**.
 2. Choose the access type:
    - **App folder** is the simplest for a personal development setup. Everything lives under `Apps/<your app name>/` in your Dropbox.
-   - **Full Dropbox** is needed to see folders outside the app folder, such as a folder shared in from another account. The access type cannot be changed after the app is created. To switch, delete the app and create a new one.
+   - **Full Dropbox** is needed to see folders outside the app folder, such as a folder shared in from another account. The access type cannot be changed after the app is created. To switch, delete the app and create a new one. The screenshot matcher reads folders that normally sit outside an app folder, so it usually needs this.
 3. On the Permissions tab, enable `files.metadata.read`, `files.content.write`, and `files.content.read`, then submit.
 4. Copy the app key and app secret from the Settings tab into `.env`.
 5. Generate a refresh token:
@@ -199,7 +209,7 @@ python get_refresh_token.py
 
 ## Configuration
 
-Settings are split in two, by one rule: anything that is the same for everyone lives in `config/settings.json`, which is committed. Anything that differs between machines or people lives in `.env`, which is not. That's why Dropbox folder paths, credentials, and the sheet ID are in `.env` (see [Setup](#setup)).
+Settings are split in two, by one rule: anything that is the same for everyone lives in `config/settings.json`, which is committed. Anything that differs between machines or people lives in `.env`, which is not. That's why Dropbox folder paths (including the screenshot matcher's year folder), credentials, and the sheet ID are in `.env`(see [Setup](#setup)).
 
 `config/settings.json` holds the shared runtime settings:
 
@@ -425,6 +435,8 @@ It asks for the path to a PDF on your computer, shows the row it would write, an
 - **A new case** goes into the first row after the last row that has a Case ID. Template text that OA has pre-filled in empty rows below the data does not push it down, and is kept. A blank row in the middle of the data is not filled.
 - **A repeated Case ID** updates that row in place instead of adding a second one. Everything taken from the PDF is refreshed, including `Price`, so a hand edit to those columns is overwritten. `Psychometrist`, `Provider`, and `Comments` are left alone. The row turns yellow with a note, so the repeat is not silent.
 
+The case's original tests, the codes taken from the PDF, are also saved on its row as hidden data (see [Stored original tests](#stored-original-tests)). A repeated PDF saves them again, so they always match the refreshed Services Requested cell. If saving fails, the row has still been written, the mapper says so, and running it again is safe. It updates the same row and tries again.
+
 ### Comments format
 
 This part is written so it can be shared with OA on its own.
@@ -506,6 +518,26 @@ python -m app.sheet_case_mover
 
 It asks for a Case ID, and optionally a Payment Status and a Date Completed. The case is written to the Finished tab, in the first row after the last case, and only then deleted from Ongoing. If the write fails, the case is still in Ongoing. Moving cases is manual for now.
 
+The case's stored original tests are deleted with its Ongoing row, since the case no longer needs them.
+
+### Stored original tests
+
+When a case is added, the codes of the tests on its PDF are saved on its Ongoing row as hidden data, using Google Sheets "developer metadata". It doesn't show in any cell or column. It exists so that a case's current tests can be worked out from its original list plus OA's comment, instead of from the Services Requested cell, which gets overwritten.
+
+- **What is stored:** the Case ID and the ordered list of test codes, for example `{"case_id":"15419897","tests":["96101-WISC-V","90791"]}`. Only codes, never descriptions, so each case takes about 80 characters. Sheets caps the hidden data on a tab at 30,000 characters, which is room for roughly 350 open cases.
+- **It follows the row.** It stays with its row when rows are inserted or sorted, and is deleted with the row when the case moves to Finished.
+- **It checks itself.** Each entry carries its Case ID. If an entry no longer matches the Case ID in its row, for example after a row was cut and pasted, it is not trusted. When a new case is added to a row that still has an entry from an old case, the old entry is replaced.
+- **Who can read it:** any Google Cloud project with access to the spreadsheet, so a future change of service account doesn't strand the entries.
+- **Cases added before this existed** have nothing stored. Running the mapper again with the case's PDF stores it, and flags the row as a repeat.
+
+To see what is stored for each row:
+
+```bash
+python -c "from app.sheet_client import get_client; from app.case_metadata import read_all_case_tests; from app.sheets_metadata_client import SheetsMetadataClient; ws = get_client().worksheet('Ongoing'); s = read_all_case_tests(SheetsMetadataClient(ws)); [print(row, e.case_id, e.tests) for row, e in sorted(s.by_row.items())]"
+```
+
+The rules are in `app/case_metadata.py` and the Google Sheets calls are in `app/sheets_metadata_client.py`, so the rules can be tested without Google.
+
 ### The Services tab
 
 Each row is one test. A row's `Code` is the code as the authorization PDF prints it, including the edition, for example `96101-WISC-V` (five digits, then letters, digits, or hyphens). A row answers to:
@@ -536,6 +568,71 @@ To clear a duplicate flag: select the row, then Fill color, then Reset, then rig
 
 If a case needs removing, delete its row. Clearing its cells leaves the fill and notes behind.
 
+## Screenshot Matcher
+
+Finds the screenshot a provider has submitted for each open case in Dropbox, and moves the case from `Ongoing` to `Finished`. It is a separate command. It is not part of `main.py` or the sweep, and nothing runs it automatically yet.
+
+### What it does
+
+For each case on the Ongoing tab, it:
+
+1. Reads the date in the `Date & Time` column and finds that day's folder in Dropbox.
+2. Finds the provider's folder inside it, using the `Provider` column.
+3. Finds the claimant's folder inside that, named from the `Patient Name` column in the form `LastNameFirstName`. "Anand Khanna" becomes `KhannaAnand`.
+4. Checks that the claimant's folder, or any folder inside it, contains an image.
+5. Takes the screenshot's last-modified time on Dropbox, converts it from UTC to Arizona time, and uses it as `Date Completed`.
+6. Moves the case to Finished, the same way `python -m app.sheet_case_mover` does.
+
+A case can only match when its `Provider` column is filled in. The sweep fills it from OA's comment, so the sweep needs to have run first.
+
+### Folder structure it expects
+
+```text
+<DROPBOX_YEAR_FOLDER>/
+  MM-YYYY/                      for example 09-2026
+    MM-DD-YYYY/                 for example 09-21-2026
+      <Provider>/               for example Dr. Doe
+        <LastNameFirstName>/    for example KhannaAnand
+          <screenshot>          an image anywhere inside this folder, subfolders included
+                                (.png, .jpg, .jpeg, .heic or .webp)
+```
+
+Months and days are zero-padded. Names are compared after ignoring capitalization, spaces, hyphens, underscores, apostrophes, commas, and other punctuation, so `Khanna, Anand` and `KhannaAnand` are the same name, and `Dr. Doe` matches `dr doe`. Beyond that the match is exact, never fuzzy.
+
+### Running it
+
+```bash
+python -m scripts.check_screenshot_to_finished           # preview, writes nothing
+python -m scripts.check_screenshot_to_finished --live    # moves the cases
+```
+
+The preview prints each case it looked at, `MATCH FOUND` or `SKIP` with the reason, and a summary of what would move. Run it first and check the matches, since a wrong match moves a real case. Like every command that changes the sheet, it only writes with `--live`.
+
+It needs `DROPBOX_YEAR_FOLDER` in `.env`, and the `tzdata` package, which is in `requirements.txt`, since Windows has no timezone database of its own.
+
+### What it skips
+
+It skips a case and says why, instead of guessing, when:
+
+- the date folder, the provider folder, or the claimant folder isn't found
+- the claimant's folder has no image file anywhere inside it (`.png`, `.jpg`, `.jpeg`, `.heic` or `.webp`), which is normal for a provider who hasn't submitted yet. Any other file type doesn't count
+- more than one claimant folder matches, in which case it prints the candidates
+- the scheduled year isn't 2026 (see the limits below)
+
+A skipped case stays in Ongoing.
+
+### Date Completed
+
+It is the screenshot's last-modified time on Dropbox, not the time the move ran, shown in Arizona time, for example `10/19/2026 03:35 PM`. If a provider replaces the screenshot later, the time changes with it. If the claimant's folder holds more than one image, it uses the one that comes first when the full file paths are sorted alphabetically, with capital letters before lowercase. That is decided by the names, not by time, so it isn't necessarily the newest or the oldest, and the time can come from any of them. The time the file first arrived isn't used. Whether it should be is still to be decided with the team. Payment Status is left blank.
+
+### Known limits
+
+- It only handles 2026: a case scheduled in any other year is skipped, because the year is written into the code and `DROPBOX_YEAR_FOLDER` points at a single year's folder. Cases outlive their year (a December exam can be submitted in January), so both years' folders will need to be reachable at once. How to do that depends on what the app can see in production, and is still to be decided. Today the app is shared only the `2026` folder, because storage space limited what could be shared.
+- Skipped cases are reported only on the console. A case with a misspelled provider or folder name just stays in Ongoing.
+- Its name matching has no automated tests yet, so the preview is the check.
+- If a move fails after the case is written to Finished but before it is deleted from Ongoing, running it again can add the case to Finished a second time.
+- Any image file in the claimant's folder counts as a submission, and its name isn't checked, because screenshot names vary by device. In practice the folder holds only the screenshot, so several images should be rare. If there are several, it picks the first by file path in alphabetical order, which is arbitrary, so Date Completed could come from any of them. Treating several images as ambiguous, as it does for several matching folders, is a possible change.
+
 ## Testing
 
 ### Automated tests
@@ -562,6 +659,12 @@ python scripts/check_sheet_connection.py
 ```
 
 This opens the sheet set in `.env` and prints its tabs and their headers. It does not import from `app/`, so it runs directly.
+
+```bash
+python -m scripts.check_case_metadata
+```
+
+This runs the stored-original-tests code against the real Google Sheets API, on a scratch tab named `MetadataCheck` that it creates and deletes. It checks that entries can be saved, replaced, and read back, and that they follow their rows through inserts, sorts, and deletes. It also checks the tab with sheet ID 0 (the first tab created with a spreadsheet), which the API describes differently from every other tab. Run it after changing the storage code, and once against any new spreadsheet. It needs `-m`, because it imports from `app/`.
 
 ### Trying the DOCX pipeline by hand
 
@@ -604,6 +707,18 @@ The message names what's missing. The three Dropbox folder variables, the settin
 
 A Dropbox folder variable doesn't match the app's access type. App folder apps use short paths such as `/incoming_pdfs`. Full Dropbox apps need the full path, such as `/Apps/<your app name>/incoming_pdfs`. See [Dropbox folder paths](#dropbox-folder-paths).
 
+**`DROPBOX_YEAR_FOLDER is missing from .env`**
+
+Add it to `.env`. Only the screenshot matcher uses it, and it is checked when the matcher looks for a date folder, so no other command needs it.
+
+**`ZoneInfoNotFoundError`**
+
+The timezone package isn't installed. Run `pip install -r requirements.txt`, which includes `tzdata`. Windows has no timezone database of its own.
+
+**The screenshot matcher skips every case, or one you expected it to match**
+
+Read the reason on the `SKIP` line. `Could not find month folder` or `date folder` usually means `DROPBOX_YEAR_FOLDER` points at the wrong place, or the month and day folders aren't zero-padded (`09-2026`, `09-21-2026`). A missing provider or claimant folder usually means a spelling difference. The `Provider` column must be filled in and must match the provider folder's name. `Claimant matched, but no screenshot was found` means the provider hasn't submitted yet, or the file isn't an image. `More than one matching claimant submission` means two folders normalize to the same name. Fix the names, then run the preview again.
+
 **`ModuleNotFoundError: No module named 'app'`**
 
 Run the script as a module from the project root: `python -m app.apply_comment_updates`, not `python app/apply_comment_updates.py`. Only `scripts/check_sheet_connection.py` runs directly.
@@ -639,6 +754,14 @@ Usually the sheet isn't shared with the service account's email address, or `GOO
 **A `ValueError` naming a column, such as `'Comments' column not found`**
 
 A header the code needs is missing or has been renamed. See [Tabs and columns](#tabs-and-columns).
+
+**`The row was written, but: Case ... was added at row ..., but its original tests couldn't be stored`**
+
+The row is in the sheet, but the hidden copy of its original tests wasn't saved, usually because of a network or permissions error, shown after the colon. Nothing is lost. Run the mapper again with the same PDF, which updates the row and tries again. If it keeps failing, run `python -m scripts.check_case_metadata`.
+
+**`A Case ID is needed to store a case's original tests`**
+
+The PDF's Case ID couldn't be read, so nothing was written. Check the PDF.
 
 **`No tab named 'Services' was found`**
 
