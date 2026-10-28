@@ -623,7 +623,7 @@ A skipped case stays in Ongoing.
 
 ### Date Completed
 
-It is the screenshot's last-modified time on Dropbox, not the time the move ran, shown in Arizona time, for example `10/19/2026 03:35 PM`. If a provider replaces the screenshot later, the time changes with it. The time the file first arrived isn't used. Whether it should be is still to be decided with the team. Payment Status is left blank.
+It is the screenshot's last-modified time on Dropbox, not the time the move ran, shown in Arizona time, for example `10/19/2026 03:35 PM`. If a provider replaces the screenshot later, the time changes with it. If the claimant's folder holds more than one image, it uses the one that comes first when the full file paths are sorted alphabetically, with capital letters before lowercase. That is decided by the names, not by time, so it isn't necessarily the newest or the oldest, and the time can come from any of them. The time the file first arrived isn't used. Whether it should be is still to be decided with the team. Payment Status is left blank.
 
 ### Known limits
 
@@ -632,6 +632,7 @@ It is the screenshot's last-modified time on Dropbox, not the time the move ran,
 - Its name matching has no automated tests yet, so the preview is the check.
 - If a move fails after the case is written to Finished but before it is deleted from Ongoing, running it again can add the case to Finished a second time.
 - Any image file in the claimant's folder counts as a submission. It can't tell a real screenshot from a stray photo, and the file's name isn't checked.
+- With several images in one claimant folder it picks the first by file path in alphabetical order, not by time, so Date Completed can come from any of them. Which one it should use is a team decision, tied to the question of first upload versus last modified.
 
 ## Testing
 
