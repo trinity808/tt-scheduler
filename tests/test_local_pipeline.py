@@ -22,7 +22,7 @@ from docx import Document
 from app.pdf_extractor import extract_schedule_data
 from app.schedule_generator import create_or_update_schedule_doc
 from app.template_filler import fill_report_template
-
+from app.services_cell import parse_services_cell, render_services_cell
 
 ROOT = Path(__file__).resolve().parents[1]
 ADULT_TEMPLATE = ROOT / "templates" / "adult_report_template.docx"
@@ -90,6 +90,18 @@ def test_service_codes_extracted_whole():
         "90791",
         "96130-AUTISM",
     ]
+
+
+def test_services_requested_text_reads_back_unchanged():
+    # The cell parser has to read exactly what the extractor writes, or the
+    # sweep could never recognize a case's original cell. Whitespace is
+    # compared collapsed, so only content and order are checked.
+    text = extract("Test1-may4_2026.pdf")["services_requested"]
+    parsed = parse_services_cell(text)
+
+    assert parsed.problems == []
+    assert parsed.codes() == ["96101-WISC-V", "90791", "96130-AUTISM"]
+    assert " ".join(render_services_cell(parsed.lines).split()) == " ".join(text.split())
 
 
 # --- Report generation ----------------------------------------------

@@ -11,3 +11,8 @@ in either file.
 # spaces. Matches "90791", "96130-AUTISM", "96101-WISC-V",
 # "96101-WIAT-III".
 SERVICE_CODE_PATTERN = r"\d{5}[\w\-]*"
+
+
+# The line drawn between tests in the Services Requested cell, on a row of its
+# own. The extractor writes it, and app/services_cell.py reads and writes it.
+SERVICE_SEPARATOR = "____________________"
