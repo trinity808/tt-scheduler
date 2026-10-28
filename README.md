@@ -37,6 +37,7 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 - Resolves short test names such as `wms` or `wisc` into full service codes through a `Services` tab. Unknown or ambiguous names are flagged. Test changes are recognized and reported, but not yet written to the sheet.
 - Flags problems directly on the sheet, with a note and, for cases, a colored cell, and prints a plain-language report after each run.
 - Moves a finished case from the `Ongoing` tab to the `Finished` tab.
+- Saves each case's original list of tests as hidden data on its row when the case is added.
 
 ## Project Structure
 
@@ -47,6 +48,7 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 │   └── dropbox_metadata.py       # When Dropbox received a file (server time, UTC)
 ├── app/
 │   ├── apply_comment_updates.py  # The sweep: applies OA's comments to the Ongoing tab (run_sweep)
+│   ├── case_metadata.py          # Saves each case's original test list as hidden data on its row (the rules)
 │   ├── comment_parser.py         # Parses the Comments column format
 │   ├── config_loader.py          # Loads config/settings.json
 │   ├── file_utils.py             # Unused, kept from the original project
@@ -59,6 +61,7 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 │   ├── services_tab.py           # Loads the Services tab and flags problems on it
 │   ├── sheet_case_mover.py       # Moves a case from Ongoing to Finished
 │   ├── sheet_client.py           # Google Sheets connection and cell helpers
+│   ├── sheets_metadata_client.py # The Google Sheets calls behind case_metadata.py
 │   ├── state_manager.py          # Unused, kept from the original project
 │   ├── sweep_report.py           # Plain-language console report for a sweep
 │   └── template_filler.py        # Report template placeholder replacement
@@ -67,7 +70,8 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 ├── docs/
 │   └── trinity_scheduler_process_guide.pdf
 ├── scripts/
-│   └── check_sheet_connection.py # Live check against your own sandbox sheet
+│   ├── check_sheet_connection.py # Live check against your own sandbox sheet
+│   ├── check_case_metadata.py    # Live check of the stored original lists, on a scratch tab
 ├── templates/                    # Local only, not in the repository (see below)
 ├── testing pdfs/                 # Local only, not in the repository (see below)
 ├── tests/                        # pytest suite
@@ -425,6 +429,8 @@ It asks for the path to a PDF on your computer, shows the row it would write, an
 - **A new case** goes into the first row after the last row that has a Case ID. Template text that OA has pre-filled in empty rows below the data does not push it down, and is kept. A blank row in the middle of the data is not filled.
 - **A repeated Case ID** updates that row in place instead of adding a second one. Everything taken from the PDF is refreshed, including `Price`, so a hand edit to those columns is overwritten. `Psychometrist`, `Provider`, and `Comments` are left alone. The row turns yellow with a note, so the repeat is not silent.
 
+The case's original tests, the codes taken from the PDF, are also saved on its row as hidden data (see [Stored original tests](#stored-original-tests)). A repeated PDF saves them again, so they always match the refreshed Services Requested cell. If saving fails, the row has still been written, the mapper says so, and running it again is safe. It updates the same row and tries again.
+
 ### Comments format
 
 This part is written so it can be shared with OA on its own.
@@ -506,6 +512,26 @@ python -m app.sheet_case_mover
 
 It asks for a Case ID, and optionally a Payment Status and a Date Completed. The case is written to the Finished tab, in the first row after the last case, and only then deleted from Ongoing. If the write fails, the case is still in Ongoing. Moving cases is manual for now.
 
+The case's stored original tests are deleted with its Ongoing row, since the case no longer needs them.
+
+### Stored original tests
+
+When a case is added, the codes of the tests on its PDF are saved on its Ongoing row as hidden data, using Google Sheets "developer metadata". It doesn't show in any cell or column. It exists so that a case's current tests can be worked out from its original list plus OA's comment, instead of from the Services Requested cell, which gets overwritten.
+
+- **What is stored:** the Case ID and the ordered list of test codes, for example `{"case_id":"15419897","tests":["96101-WISC-V","90791"]}`. Only codes, never descriptions, so each case takes about 80 characters. Sheets caps the hidden data on a tab at 30,000 characters, which is room for roughly 350 open cases.
+- **It follows the row.** It stays with its row when rows are inserted or sorted, and is deleted with the row when the case moves to Finished.
+- **It checks itself.** Each entry carries its Case ID. If an entry no longer matches the Case ID in its row, for example after a row was cut and pasted, it is not trusted. When a new case is added to a row that still has an entry from an old case, the old entry is replaced.
+- **Who can read it:** any Google Cloud project with access to the spreadsheet, so a future change of service account doesn't strand the entries.
+- **Cases added before this existed** have nothing stored. Running the mapper again with the case's PDF stores it, and flags the row as a repeat.
+
+To see what is stored for each row:
+
+```bash
+python -c "from app.sheet_client import get_client; from app.case_metadata import read_all_case_tests; from app.sheets_metadata_client import SheetsMetadataClient; ws = get_client().worksheet('Ongoing'); s = read_all_case_tests(SheetsMetadataClient(ws)); [print(row, e.case_id, e.tests) for row, e in sorted(s.by_row.items())]"
+```
+
+The rules are in `app/case_metadata.py` and the Google Sheets calls are in `app/sheets_metadata_client.py`, so the rules can be tested without Google.
+
 ### The Services tab
 
 Each row is one test. A row's `Code` is the code as the authorization PDF prints it, including the edition, for example `96101-WISC-V` (five digits, then letters, digits, or hyphens). A row answers to:
@@ -562,6 +588,12 @@ python scripts/check_sheet_connection.py
 ```
 
 This opens the sheet set in `.env` and prints its tabs and their headers. It does not import from `app/`, so it runs directly.
+
+```bash
+python -m scripts.check_case_metadata
+```
+
+This runs the stored-original-tests code against the real Google Sheets API, on a scratch tab named `MetadataCheck` that it creates and deletes. It checks that entries can be saved, replaced, and read back, and that they follow their rows through inserts, sorts, and deletes. It also checks the tab with sheet ID 0 (the first tab created with a spreadsheet), which the API describes differently from every other tab. Run it after changing the storage code, and once against any new spreadsheet. It needs `-m`, because it imports from `app/`.
 
 ### Trying the DOCX pipeline by hand
 
@@ -639,6 +671,14 @@ Usually the sheet isn't shared with the service account's email address, or `GOO
 **A `ValueError` naming a column, such as `'Comments' column not found`**
 
 A header the code needs is missing or has been renamed. See [Tabs and columns](#tabs-and-columns).
+
+**`The row was written, but: Case ... was added at row ..., but its original tests couldn't be stored`**
+
+The row is in the sheet, but the hidden copy of its original tests wasn't saved, usually because of a network or permissions error, shown after the colon. Nothing is lost. Run the mapper again with the same PDF, which updates the row and tries again. If it keeps failing, run `python -m scripts.check_case_metadata`.
+
+**`A Case ID is needed to store a case's original tests`**
+
+The PDF's Case ID couldn't be read, so nothing was written. Check the PDF.
 
 **`No tab named 'Services' was found`**
 
