@@ -37,6 +37,7 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 - Resolves short test names such as `wms` or `wisc` into full service codes through a `Services` tab. Unknown or ambiguous names are flagged. Test changes are recognized and reported, but not yet written to the sheet.
 - Flags problems directly on the sheet, with a note and, for cases, a colored cell, and prints a plain-language report after each run.
 - Moves a finished case from the `Ongoing` tab to the `Finished` tab.
+- Finds the screenshot a provider has submitted for each open case in Dropbox, and moves the case to the `Finished` tab with the screenshot's time as its completion date. This is a separate command and previews by default.
 - Saves each case's original list of tests as hidden data on its row when the case is added.
 
 ## Project Structure
@@ -56,6 +57,7 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 │   ├── ongoing_row_mapper.py     # Maps an extracted PDF to an Ongoing row, adds or updates it
 │   ├── pdf_extractor.py          # PDF parsing and data extraction
 │   ├── schedule_generator.py     # Daily schedule DOCX creation/update
+│   ├── screenshot_matcher.py     # Finds a provider's submitted screenshot in Dropbox and moves the case to Finished
 │   ├── service_format.py         # The shared pattern for a service code
 │   ├── service_lookup.py         # Turns typed test names into service codes
 │   ├── services_tab.py           # Loads the Services tab and flags problems on it
@@ -70,8 +72,9 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 ├── docs/
 │   └── trinity_scheduler_process_guide.pdf
 ├── scripts/
-│   ├── check_sheet_connection.py # Live check against your own sandbox sheet
 │   ├── check_case_metadata.py    # Live check of the stored original lists, on a scratch tab
+│   ├── check_screenshot_to_finished.py # Runs the screenshot matcher (preview by default)
+│   └── check_sheet_connection.py # Live check against your own sandbox sheet
 ├── templates/                    # Local only, not in the repository (see below)
 ├── testing pdfs/                 # Local only, not in the repository (see below)
 ├── tests/                        # pytest suite
@@ -152,6 +155,7 @@ copy .env.example .env        # PowerShell
 | `DROPBOX_INPUT_FOLDER`, `DROPBOX_PROCESSED_PDF_FOLDER`, `DROPBOX_SCHEDULE_FOLDER` | The Dropbox folders the DOCX pipeline reads from and writes to | `main.py` |
 | `GOOGLE_SHEETS_ID` | The ID in your sheet's URL, between `/d/` and `/edit` | The tracking sheet |
 | `GOOGLE_SERVICE_ACCOUNT_FILE` | Path to the service account key, `config/service_account.json` by default | The tracking sheet |
+| `DROPBOX_YEAR_FOLDER` | The Dropbox folder that holds the year's month folders, such as `/2026`, written the way the folder paths below are | The screenshot matcher (see [Screenshot Matcher](#screenshot-matcher)) |
 | `SMTP_*`, `ALERT_TO_EMAIL` | Optional failure emails | Only when `email_notifications_enabled` is `true` in `config/settings.json` |
 
 The SMTP settings use a plain username and password, which works with providers such as Gmail (with an app password). It does not work with Microsoft 365 mailboxes, which no longer accept that login.
@@ -164,6 +168,8 @@ The three folder variables are personal to your Dropbox app, which is why they l
 - **Full Dropbox access:** full paths from the root of the account. For example `/Apps/<your app name>/incoming_pdfs`.
 
 If one is missing, the startup check stops the run with a message naming it.
+
+`DROPBOX_YEAR_FOLDER` follows the same path rules. It is used only by the screenshot matcher, and it is checked when the matcher looks for a date folder, so the startup check doesn't mention it.
 
 ### Google Sheets setup
 
@@ -187,7 +193,7 @@ It prints the tabs it found and each tab's headers.
 1. Create a Dropbox app in the [Dropbox App Console](https://www.dropbox.com/developers/apps/create) with **Scoped access**.
 2. Choose the access type:
    - **App folder** is the simplest for a personal development setup. Everything lives under `Apps/<your app name>/` in your Dropbox.
-   - **Full Dropbox** is needed to see folders outside the app folder, such as a folder shared in from another account. The access type cannot be changed after the app is created. To switch, delete the app and create a new one.
+   - **Full Dropbox** is needed to see folders outside the app folder, such as a folder shared in from another account. The access type cannot be changed after the app is created. To switch, delete the app and create a new one. The screenshot matcher reads folders that normally sit outside an app folder, so it usually needs this.
 3. On the Permissions tab, enable `files.metadata.read`, `files.content.write`, and `files.content.read`, then submit.
 4. Copy the app key and app secret from the Settings tab into `.env`.
 5. Generate a refresh token:
@@ -203,7 +209,7 @@ python get_refresh_token.py
 
 ## Configuration
 
-Settings are split in two, by one rule: anything that is the same for everyone lives in `config/settings.json`, which is committed. Anything that differs between machines or people lives in `.env`, which is not. That's why Dropbox folder paths, credentials, and the sheet ID are in `.env` (see [Setup](#setup)).
+Settings are split in two, by one rule: anything that is the same for everyone lives in `config/settings.json`, which is committed. Anything that differs between machines or people lives in `.env`, which is not. That's why Dropbox folder paths (including the screenshot matcher's year folder), credentials, and the sheet ID are in `.env`(see [Setup](#setup)).
 
 `config/settings.json` holds the shared runtime settings:
 
@@ -562,6 +568,69 @@ To clear a duplicate flag: select the row, then Fill color, then Reset, then rig
 
 If a case needs removing, delete its row. Clearing its cells leaves the fill and notes behind.
 
+## Screenshot Matcher
+
+Finds the screenshot a provider has submitted for each open case in Dropbox, and moves the case from `Ongoing` to `Finished`. It is a separate command. It is not part of `main.py` or the sweep, and nothing runs it automatically yet.
+
+### What it does
+
+For each case on the Ongoing tab, it:
+
+1. Reads the date in the `Date & Time` column and finds that day's folder in Dropbox.
+2. Finds the provider's folder inside it, using the `Provider` column.
+3. Finds the claimant's folder inside that, named from the `Patient Name` column in the form `LastNameFirstName`. "Anand Khanna" becomes `KhannaAnand`.
+4. Checks that the claimant's folder contains a screenshot.
+5. Takes the screenshot's last-modified time on Dropbox, converts it from UTC to Arizona time, and uses it as `Date Completed`.
+6. Moves the case to Finished, the same way `python -m app.sheet_case_mover` does.
+
+A case can only match when its `Provider` column is filled in. The sweep fills it from OA's comment, so the sweep needs to have run first.
+
+### Folder structure it expects
+
+```text
+<DROPBOX_YEAR_FOLDER>/
+  MM-YYYY/                      for example 09-2026
+    MM-DD-YYYY/                 for example 09-21-2026
+      <Provider>/               for example Dr. Doe
+        <LastNameFirstName>/    for example KhannaAnand
+          <screenshot>          an image: .png, .jpg, .jpeg, .heic or .webp
+```
+
+Months and days are zero-padded. Names are compared after ignoring capitalization, spaces, hyphens, underscores, apostrophes, commas, and other punctuation, so `Khanna, Anand` and `KhannaAnand` are the same name, and `Dr. Doe` matches `dr doe`. Beyond that the match is exact, never fuzzy.
+
+### Running it
+
+```bash
+python -m scripts.check_screenshot_to_finished           # preview, writes nothing
+python -m scripts.check_screenshot_to_finished --live    # moves the cases
+```
+
+The preview prints each case it looked at, `MATCH FOUND` or `SKIP` with the reason, and a summary of what would move. Run it first and check the matches, since a wrong match moves a real case. Like every command that changes the sheet, it only writes with `--live`.
+
+It needs `DROPBOX_YEAR_FOLDER` in `.env`, and the `tzdata` package, which is in `requirements.txt`, since Windows has no timezone database of its own.
+
+### What it skips
+
+It skips a case and says why, instead of guessing, when:
+
+- the date folder, the provider folder, or the claimant folder isn't found
+- - the claimant's folder has no image file (`.png`, `.jpg`, `.jpeg`, `.heic` or `.webp`), which is normal for a provider who hasn't submitted yet. Any other file type doesn't count
+- more than one claimant folder matches, in which case it prints the candidates
+- the scheduled year isn't 2026 (see the limits below)
+
+A skipped case stays in Ongoing.
+
+### Date Completed
+
+It is the screenshot's last-modified time on Dropbox, not the time the move ran, shown in Arizona time, for example `10/19/2026 03:35 PM`. If a provider replaces the screenshot later, the time changes with it. The time the file first arrived isn't used. Whether it should be is still to be decided with the team. Payment Status is left blank.
+
+### Known limits
+
+- It only handles 2026. A case scheduled in any other year is skipped, because the year is written into the code.
+- Skipped cases are reported only on the console. A case with a misspelled provider or folder name just stays in Ongoing.
+- Its name matching has no automated tests yet, so the preview is the check.
+- If a move fails after the case is written to Finished but before it is deleted from Ongoing, running it again can add the case to Finished a second time.
+
 ## Testing
 
 ### Automated tests
@@ -635,6 +704,18 @@ The message names what's missing. The three Dropbox folder variables, the settin
 **`not_found` on the first Dropbox call**
 
 A Dropbox folder variable doesn't match the app's access type. App folder apps use short paths such as `/incoming_pdfs`. Full Dropbox apps need the full path, such as `/Apps/<your app name>/incoming_pdfs`. See [Dropbox folder paths](#dropbox-folder-paths).
+
+**`DROPBOX_YEAR_FOLDER is missing from .env`**
+
+Add it to `.env`. Only the screenshot matcher uses it, and it is checked when the matcher looks for a date folder, so no other command needs it.
+
+**`ZoneInfoNotFoundError`**
+
+The timezone package isn't installed. Run `pip install -r requirements.txt`, which includes `tzdata`. Windows has no timezone database of its own.
+
+**The screenshot matcher skips every case, or one you expected it to match**
+
+Read the reason on the `SKIP` line. `Could not find month folder` or `date folder` usually means `DROPBOX_YEAR_FOLDER` points at the wrong place, or the month and day folders aren't zero-padded (`09-2026`, `09-21-2026`). A missing provider or claimant folder usually means a spelling difference. The `Provider` column must be filled in and must match the provider folder's name. `Claimant matched, but no screenshot was found` means the provider hasn't submitted yet, or the file isn't an image. `More than one matching claimant submission` means two folders normalize to the same name. Fix the names, then run the preview again.
 
 **`ModuleNotFoundError: No module named 'app'`**
 
