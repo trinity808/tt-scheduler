@@ -627,7 +627,7 @@ It is the screenshot's last-modified time on Dropbox, not the time the move ran,
 
 ### Known limits
 
-- It only handles 2026: a case scheduled in any other year is skipped, because the year is written into the code and `DROPBOX_YEAR_FOLDER` points at a single year's folder. Cases outlive their year (a December exam can be submitted in January), so both years' folders will need to be reachable at once. How to do that depends on what the app can see in production, and is still to be decided.
+- It only handles 2026: a case scheduled in any other year is skipped, because the year is written into the code and `DROPBOX_YEAR_FOLDER` points at a single year's folder. Cases outlive their year (a December exam can be submitted in January), so both years' folders will need to be reachable at once. How to do that depends on what the app can see in production, and is still to be decided. Today the app is shared only the `2026` folder, because storage space limited what could be shared.
 - Skipped cases are reported only on the console. A case with a misspelled provider or folder name just stays in Ongoing.
 - Its name matching has no automated tests yet, so the preview is the check.
 - If a move fails after the case is written to Finished but before it is deleted from Ongoing, running it again can add the case to Finished a second time.
