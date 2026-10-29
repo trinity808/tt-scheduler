@@ -78,7 +78,7 @@ def test_rerun_with_no_changes_writes_nothing():
 
 
 def test_test_changes_are_not_applied():
-    """Scope guard: test changes aren't applied to the sheet yet. Replace once they are."""
+    """Without a metadata client, test changes are not applied."""
     headers = ["Case ID", "Provider", "Psychometrist", "Services Requested", "Price", "Comments"]
     ws = FakeWorksheet([
         headers,
@@ -284,7 +284,7 @@ def test_flag_clears_once_an_unknown_test_is_corrected():
 
 
 def test_resolved_test_changes_are_not_applied_to_the_sheet():
-    """Scope guard: test changes are resolved but not applied yet. Replace once they are."""
+    """Without a metadata client, resolved test changes are not applied either."""
     headers = ["Case ID", "Provider", "Psychometrist", "Services Requested", "Price", "Comments"]
     ws = FakeWorksheet([
         headers,

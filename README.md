@@ -34,8 +34,8 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 
 - Adds each extracted case as a row on the sheet's `Ongoing` tab. A repeated PDF updates that row in place and flags it as a duplicate.
 - Reads OA's notes in the Comments column (`Provider:`, `Psychometrist:`, `Add:`, `Change:`) and fills in the Provider and Psychometrist columns.
-- Resolves short test names such as `wms` or `wisc` into full service codes through a `Services` tab. Unknown or ambiguous names are flagged. Test changes are recognized and reported, but not yet written to the sheet.
-- Flags problems directly on the sheet, with a note and, for cases, a colored cell, and prints a plain-language report after each run.
+- Resolves short test names such as `wms` or `wisc` into full service codes through a `Services` tab, and applies `Add:` and `Change:` lines to the case's Services Requested cell, marking each added or swapped test. Unknown or ambiguous names, and changes that don't fit the case, are flagged.
+- Flags problems directly on the sheet, with a note and, for cases, a colored cell, and prints a plain-language report after each run. The sweep previews by default and only writes with `--live`.
 - Moves a finished case from the `Ongoing` tab to the `Finished` tab.
 - Finds the screenshot a provider has submitted for each open case in Dropbox, and moves the case to the `Finished` tab with the screenshot's time as its completion date. This is a separate command and previews by default.
 - Saves each case's original list of tests as hidden data on its row when the case is added.
@@ -48,7 +48,7 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 │   ├── dropbox_api.py            # Dropbox auth and file operations
 │   └── dropbox_metadata.py       # When Dropbox received a file (server time, UTC)
 ├── app/
-│   ├── apply_comment_updates.py  # The sweep: applies OA's comments to the Ongoing tab (run_sweep)
+│   ├── apply_comment_updates.py  # The sweep: applies OA's comments, test changes included, to the Ongoing tab (run_sweep, and the command line)
 │   ├── case_metadata.py          # Saves each case's original test list as hidden data on its row (the rules)
 │   ├── comment_parser.py         # Parses the Comments column format
 │   ├── config_loader.py          # Loads config/settings.json
@@ -58,9 +58,12 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 │   ├── pdf_extractor.py          # PDF parsing and data extraction
 │   ├── schedule_generator.py     # Daily schedule DOCX creation/update
 │   ├── screenshot_matcher.py     # Finds a provider's submitted screenshot in Dropbox and moves the case to Finished
+│   ├── service_changes.py        # Applies a comment's test changes to a case's original tests, in order
 │   ├── service_format.py         # The shared pattern for a service code
 │   ├── service_lookup.py         # Turns typed test names into service codes
+│   ├── services_cell.py          # Reads and writes the Services Requested cell's text and markers
 │   ├── services_tab.py           # Loads the Services tab and flags problems on it
+│   ├── services_update.py        # Decides what the cell should become, and when not to touch it
 │   ├── sheet_case_mover.py       # Moves a case from Ongoing to Finished
 │   ├── sheet_client.py           # Google Sheets connection and cell helpers
 │   ├── sheets_metadata_client.py # The Google Sheets calls behind case_metadata.py
@@ -70,6 +73,7 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 ├── config/
 │   └── settings.json             # Runtime folders and scheduler settings
 ├── docs/
+│   ├── manual_check_apply_test_changes.md  # Step-by-step checks to run after changing the sweep
 │   └── trinity_scheduler_process_guide.pdf
 ├── scripts/
 │   ├── check_case_metadata.py    # Live check of the stored original lists, on a scratch tab
@@ -317,7 +321,7 @@ launchctl list | grep trinity
 
 ## Scheduling on Windows
 
-Windows Task Scheduler can run the DOCX pipeline (`main.py`) on a repeating schedule. This schedules the pipeline only. The sheet tracking is not scheduled yet.
+Windows Task Scheduler can run the DOCX pipeline (`main.py`) on a repeating schedule. This schedules the pipeline only. See "Scheduling the sweep" at the end of this section for the sheet.
 
 1. Open Task Scheduler and choose **Create Task**. Use this, not the Basic Task wizard, which hides settings you need.
 2. **General:** give it a name. "Run only when user is logged on" is the option this has been tested with.
@@ -339,6 +343,24 @@ Mistakes made while setting this up, and what each looks like:
 - **Dropbox folder paths in `.env` that don't match the app's access type.** The run starts but fails at its first Dropbox call with a `not_found` error in `logs/scheduler_error.log`. See [Dropbox folder paths](#dropbox-folder-paths).
 
 Not tested: "Run whether user is logged on or not", running while the computer is asleep, and the wake-the-computer option.
+
+### Scheduling the sweep
+ 
+The sweep (`python -m app.apply_comment_updates`) can be scheduled the same way, with different fields in the action. This has not been tried yet.
+ 
+- **Program/script:** the full path to the virtual environment's Python, as above
+- **Add arguments:** `-m app.apply_comment_updates --live`
+- **Start in:** the project root, which `-m` needs to find `app/`
+ 
+Two rules. Never add `--pause`, which makes the run wait for a key nobody will press. And the arguments must include `--live`, since without it the command only previews and writes nothing.
+ 
+Before scheduling it:
+ 
+- **Its report is only printed.** The sweep doesn't use the logger, so a scheduled run's report would be lost. Fix that first (see Known gaps), or the scheduled runs can't be checked.
+- **Run it by hand first,** as a preview and then with `--live`, against the sheet it will run on.
+- **It is safe to repeat.** A rerun on an unchanged sheet writes nothing, so the interval can be short. How often OA's comments should be picked up is still to be decided.
+ 
+The screenshot matcher is not scheduled either. If it is, the same two rules apply to `-m scripts.check_screenshot_to_finished --live`.
 
 ## Processing Flow
 
@@ -383,6 +405,8 @@ The Python logger writes the first two itself, in rotating files with a 2 MB lim
 
 Only logger output reaches these files. Some low-level messages in `apis/dropbox_api.py`, such as the upload and move confirmations, are plain `print` calls. They appear on the console but not in the log, and the run's own log lines already record the same steps. The macOS shell script also appends the console output to the same files, which has not been tested.
 
+The sweep and the screenshot matcher don't use this logger. They print their reports to the console, so nothing about their runs reaches `logs/`. That is fine when someone runs them by hand. For a scheduled run it means the report is lost. This is listed under Known gaps.
+
 When email alerts are enabled in `config/settings.json`, a failed PDF or a fatal run failure sends an email using the SMTP values in `.env`. They are off by default. The SMTP settings use a plain username and password, so a Gmail account needs an app password. Microsoft 365 mailboxes no longer accept that kind of login and would need a different approach.
 
 ## Tracking Sheet
@@ -416,13 +440,13 @@ The code finds columns by their header name, not their position, so columns can 
 
 | Tab | Headers the code needs |
 |---|---|
-| Ongoing | `Case ID` everywhere. `Provider`, `Psychometrist`, and `Comments` for the sweep. The other headers are filled from the PDF if present and left blank if not. |
+| Ongoing | `Case ID` everywhere. `Provider`, `Psychometrist`, and `Comments` for the sweep. `Services Requested` for applying test changes (without it the sweep still runs, and says test changes can't be applied). The other headers are filled from the PDF if present and left blank if not. |
 | Finished | `Case ID`. Any header that also exists in Ongoing is copied across. `Payment Status` and `Date Completed` are filled only by whatever moves the case, and are blank otherwise. |
-| Services | `Code` and `Aliases`. `Name` and `Price` are for people and are not read. |
+| Services | `Code` and `Aliases`. `Name` is read too, as the description on lines the sweep adds, and may be blank. `Price` is not read. |
 
 These columns are a draft and may change. If you rename or remove one, search the repository for the header's name to find what uses it, for example `git grep -n "Payment Status"`.
 
-Who fills what on the Ongoing tab: everything up to `Allegations`, plus `Price`, comes from the PDF. `Psychometrist` and `Provider` are filled by the sweep from the Comments column. `Comments` is written by OA. `Price` is the total printed on the PDF. Final billed amounts are set separately on the billing request forms and are not tracked here.
+Who fills what on the Ongoing tab: everything up to `Allegations`, plus `Price`, comes from the PDF. `Services Requested` also comes from the PDF, and the sweep adds to it when OA's comment asks for test changes. `Psychometrist` and `Provider` are filled by the sweep from the Comments column. `Comments` is written by OA. `Price` is the total printed on the PDF. Final billed amounts are set separately on the billing request forms and are not tracked here, and the sweep never changes `Price`.
 
 ### Adding a case
 
@@ -438,77 +462,162 @@ It asks for the path to a PDF on your computer, shows the row it would write, an
 The case's original tests, the codes taken from the PDF, are also saved on its row as hidden data (see [Stored original tests](#stored-original-tests)). A repeated PDF saves them again, so they always match the refreshed Services Requested cell. If saving fails, the row has still been written, the mapper says so, and running it again is safe. It updates the same row and tries again.
 
 ### Comments format
-
+ 
 This part is written so it can be shared with OA on its own.
-
+ 
 OA writes notes about a case in its **Comments** cell. Put each item on its own line (Ctrl+Enter, or Cmd+Enter on a Mac, starts a new line inside a cell), or separate items with a semicolon. Capitalization doesn't matter.
-
+ 
 ```text
 Provider: Dr. Doe
 Psychometrist: J. Smith
 Add: WMS, VABS
 Change: CTONI to WAIS
 ```
-
+ 
 - `Provider:` and `Psychometrist:` fill the Provider and Psychometrist columns.
 - `Add:` lists tests to add, separated by commas.
 - `Change:` replaces one test with another. Name both, for example `Change: WISC to WIAT`. Several can be listed, separated by commas.
 - A line left blank is ignored, so a copy of the empty template can be filled in with only what applies:
-
 ```text
 Provider:
 Psychometrist:
 Add:
 Change:
 ```
-
+ 
 Tests are written by short name, such as `wms`, `WISC-V`, or `Psychiatric Exam`. Spaces, capitalization, and punctuation don't matter. A name that isn't in the Services tab, or that matches two tests, is flagged so it can be corrected.
-
-If a line can't be used, the Comments cell turns orange and gets a note saying what was wrong and what was done with that line. The problems it catches are a misspelled field name (with a suggestion), a line with no colon, an unknown test, two fields crammed onto one line, and the same field given twice. A line that can't be used is skipped, and the rest of the comment still applies. Fix the comment, and the orange clears itself the next time the sweep runs.
-
+ 
 `Price:` and `+Service:`, from an earlier draft of this format, are no longer recognized.
-
-Test changes (`Add` and `Change`) are checked, and any problems are flagged, but they are not yet written into the sheet.
+ 
+**What happens to the tests**
+ 
+`Add:` and `Change:` lines change the case's **Services Requested** cell the next time the sweep runs:
+ 
+- An added test goes at the end of the list, and its line ends with `(added)`.
+- A swapped test takes the place of the one it replaces, and its line ends with `(changed from <the old test's code>)`.
+- Lines from the original PDF stay exactly as they were.
+Changes are applied in the order they are written, so a swap has to name a test the case has at that point. `Add: wiat` followed by `Change: wiat to wppsi` works. The other way round does not.
+ 
+**Edit the comment, don't rewrite it.** Keep the earlier lines and add new ones at the bottom. Every time it runs, the system starts again from the PDF's original list and applies every line in the comment, so earlier lines are never applied twice and are never flagged.
+ 
+If a line is deleted from the comment, the test it added is **kept**, not removed, because tests are only ever added or swapped. The Comments cell turns orange to say so. To keep the test, put the line back in the comment. To remove it, delete its line from the Services Requested cell.
+ 
+If a change can't be applied, for example adding a test the case already has, or swapping a test the case doesn't have, that line is skipped and flagged, and the rest of the comment still applies.
+ 
+Please don't type into the Services Requested cell. A line typed there is kept but flagged, and a line the system can't read stops all updates to that case's tests until it is fixed or removed.
+ 
+Price is never changed.
+ 
+If a line can't be used, the Comments cell turns orange and gets a note saying what was wrong and what was done with that line. See [Flags on the sheet](#flags-on-the-sheet). Fix the comment, and the orange clears itself the next time the sweep runs.
 
 ### Running the sweep
-
+ 
 ```bash
-python -m app.apply_comment_updates
+python -m app.apply_comment_updates            # preview: shows what would change, writes nothing
+python -m app.apply_comment_updates --live     # applies the changes
 ```
-
+ 
+Like every command that changes the sheet, it previews by default. Run the preview first, read the report, and then run it again with `--live`. The `--live` report says the same things in the past tense.
+ 
+Add `--pause` to wait for Enter before the window closes, for a shortcut that is double-clicked. Never use `--pause` in a scheduled task, which would wait for a key nobody presses.
+ 
 One run does this, in order:
-
-1. Loads the Services tab, and flags any problems with it.
-2. Reads the Comments cell of every case.
-3. Fills in `Provider` and `Psychometrist` where the comment names someone different from what is there. An unchanged value is never rewritten, and the comment is the source of truth for these two columns, so a different name typed straight into the column is replaced the next time the sweep runs.
-4. Flags any comment with a problem.
-5. Prints a plain-language report.
-
-Rows with no Case ID are skipped entirely, comment and all, so a template kept in a spare row is left alone. Running it again and again is safe. It ends with "Press Enter to close", which suits a manual run and would hang a scheduled one, so it is not scheduled yet.
-
-A sample of the report:
-
+ 
+1. Loads the Services tab, and flags any problems on it (not in a preview).
+2. Reads every case's saved original tests, in one call.
+3. Goes through the cases. For each one with a comment, or with applied changes still showing in its cell:
+   1. Fills in `Provider` and `Psychometrist` where the comment names someone different from what is there. An unchanged value is never rewritten, and the comment is the source of truth for these two columns, so a different name typed straight into the column is replaced the next time the sweep runs.
+   2. Applies the comment's test changes to the `Services Requested` cell (see [How test changes are applied](#how-test-changes-are-applied)).
+   3. Flags the Comments cell if anything needs attention, and clears the flag when nothing does.
+4. Prints a plain-language report.
+**Which cases it looks at**
+ 
+- A row with no Case ID is skipped entirely, comment and all, so a template kept in a spare row is left alone.
+- A case's tests are looked at only when its comment has test changes, or its Services Requested cell already shows applied changes (a line ending in `(added)` or `(changed from ...)`). The second case catches a comment that was cleared while its changes are still in the cell. Otherwise the cell is left alone, even if someone edited it.
+- A case with an empty comment and a plain cell is skipped.
+Running it again and again is safe. A value that wouldn't change isn't rewritten, and a rerun on an unchanged comment writes nothing.
+ 
+**When something is missing**
+ 
+- If the Services tab is missing or unusable, `Provider` and `Psychometrist` still apply, and `Add:` and `Change:` lines are flagged "services list not loaded". Test changes are not applied.
+- If the Ongoing tab has no `Services Requested` column, test changes can't be applied, and the report says so once.
+- If a case's saved original tests belong to a different case (for example after a row was cut and pasted), that case's tests are left alone and flagged. Its other updates still apply.
+- If a case's original tests need saving first and the save fails, its cell is left alone and flagged. The original is always saved before the cell is written, so a changed cell never exists without it.
+**The report**
+ 
 ```text
 Services tab needs attention:
   - Row 5: 'Beery VMI' isn't a valid service code (five digits, e.g. 96101-WISC-V), so it was skipped
   (noted on the Services tab)
-
+ 
 Case 15419897:
-  Provider: updated from Dr. Smith to Dr. Doe
-  Psychometrist: set to J. Smith
-  Test changes found (not applied to the sheet yet):
-    add 96130-CARS-2
-    change 96101-WISC-V to 96101-WAIS-IV
-
-Case 15419372:
+  Provider: set to Dr. Doe
+  Tests updated:
+    change 96130-AUTISM to 96101-WAIS-IV
+    add 96101-WMS-IV
+  Original tests saved from the sheet: 96101-WISC-V, 90791, 96130-AUTISM
+ 
+Case 15419898:
   NEEDS ATTENTION:
-    Add: wisk  (skipped: unknown test 'wisk', did you mean WISC?)
-
-2 comment(s) processed, 2 field(s) updated, 1 flagged for attention. 2 test change(s) found, not applied to the sheet yet.
-Flagged cases: 15419372
+    Add: 96101-WISC-V  (skipped: 96101-WISC-V is already on this case)
+ 
+2 comment(s) processed, 1 field(s) updated, 1 flagged for attention.
+1 case(s) had their tests updated.
+1 original list(s) saved.
+Flagged cases: 15419898
 ```
+ 
+- It describes what **this run** changed, compared with the cell as it was, not what the cell says now. A case that was already current says `Tests: already up to date, no change`.
+- `Original tests saved from the sheet` means nothing was stored for that case, so its clean cell was taken as the original (see [Stored original tests](#stored-original-tests)).
+- A preview opens with `DRY RUN: nothing was written to the sheet.`, uses "would be" throughout, skips the note on the Services tab and says so, and ends with the command that applies it.
+The report is printed on the console only. Nothing is written to a log file, so the report of a scheduled run would be lost. This is listed under Known gaps.
 
-If the Services tab is missing or unusable, the sweep still runs. Provider and Psychometrist are still filled in, and `Add:` and `Change:` lines are flagged as "services list not loaded".
+### How test changes are applied
+ 
+For people maintaining the code. The rules are in three modules that work on plain data and are tested without Google Sheets, and the sweep wires them to the sheet:
+ 
+| Module | What it does |
+|---|---|
+| `app/services_cell.py` | Reads and writes the Services Requested cell's text: the numbered lines, the separator rows, and the markers |
+| `app/service_changes.py` | Applies a comment's changes to a case's original tests, in order, and works out each line's marker |
+| `app/services_update.py` | Decides what the cell should become, and whether it is safe to change it at all |
+| `app/apply_comment_updates.py` | Reads the sheet, calls the above for each case, and writes the results |
+ 
+**The cell is output only.** A case's tests are always worked out as the **stored original tests plus every change in the comment, in order**. The cell is never the starting point. That is why reruns are safe, why an appended comment never re-flags earlier changes, and why a mistake can't compound. The cell is read for only three things: the wording of each line, any line nothing explains, and the safety checks below.
+ 
+**Each change is checked before it is applied,** against the list as built so far:
+ 
+- `Add: X` needs X not to be on the case already.
+- `Change: X to Y` needs X to be on the case, and Y not to be.
+A change that doesn't fit is skipped with a reason, and the rest still apply.
+ 
+**Markers** describe the net result against the PDF's list, however many changes it took:
+ 
+| Situation | Marker |
+|---|---|
+| A test from the PDF | none, wherever it ends up |
+| A test not on the PDF that took the place of one that is, through one swap or several | `(changed from <that PDF test>)` |
+| Any other test not on the PDF | `(added)` |
+| A swap back to the original test | none, and it returns to its place |
+ 
+A swapped test keeps its position. An added test goes at the end.
+ 
+**Descriptions** come from the cell's own line for that code if it has one, so the PDF's wording is never replaced. Failing that, from the Services tab's `Name`, and failing that the line shows only the code.
+ 
+**The sweep refuses to change a cell,** writing nothing and flagging the case, when:
+ 
+- the cell has a line it can't read, such as a note typed under a test, because writing over it would lose what someone typed
+- nothing is stored for the case and the cell already shows applied changes, because adopting it as the original would make those changes permanent
+- nothing is stored, the cell is empty, and the comment has changes, because there is nothing to adopt
+**Adopting a cell.** When nothing is stored for a case and its cell is clean (every line readable, no markers), the cell is the PDF's list, so it is saved as the original. The save happens before the cell is written.
+ 
+**Lines nothing explains.** A line in the cell that neither the original nor the comment accounts for is **kept**, and the comment is flagged. This happens when OA rewrites a comment from scratch or types a line in by hand. A comment counts as accounting for a test if it mentions it anywhere, even to swap it away and back, so an explicit change back is respected. A kept swap stays in its place. If a kept change no longer fits the new comment, it is **dropped**, and the flag says so. Nothing leaves the cell without a message.
+ 
+**Other details.**
+ 
+- A PDF line deleted from the cell by hand comes back whenever the case is updated, because the cell is output.
+- The cell is rewritten only when its content would change. A difference in spacing alone doesn't count.
+- The functions `run_sweep` and `apply_comment_updates` write by default, since that is their job, and take `dry_run=True` to preview. The command line does the opposite and previews unless given `--live`.
 
 ### Moving a case to Finished
 
@@ -539,34 +648,50 @@ python -c "from app.sheet_client import get_client; from app.case_metadata impor
 The rules are in `app/case_metadata.py` and the Google Sheets calls are in `app/sheets_metadata_client.py`, so the rules can be tested without Google.
 
 ### The Services tab
-
+ 
 Each row is one test. A row's `Code` is the code as the authorization PDF prints it, including the edition, for example `96101-WISC-V` (five digits, then letters, digits, or hyphens). A row answers to:
-
+ 
 - its full code, `96101-WISC-V`
 - the part after the five digits, `WISC-V`, which is worked out automatically
 - anything in the `Aliases` column, separated by commas, such as `WISC`
-
+The `Name` column holds the text the PDF prints after the code, for example `Wechsler Intelligence Scale for Children - Ages 6 to 16 years`. It is the description on any line the sweep adds or restores, so it should be the full text, copied from a PDF. Line breaks and runs of spaces in it are collapsed to single spaces. A blank `Name` means the line shows only the code. Typing a `Name` into a comment doesn't work, since it is only for reading. The `Price` column isn't read.
+ 
 Editing the tab needs no code change. The sweep reads it fresh each run. The tab is edited by people, so a problem in one row doesn't stop the rest:
-
+ 
 - A row whose `Code` isn't a valid service code is skipped and reported. A test with no billing code can't be listed yet.
 - A name that points to more than one row is reported and not accepted until it's fixed, for example an alias that matches another test's abbreviation.
 - A missing tab, an empty tab, or a missing `Code` or `Aliases` header is reported, and the sweep carries on without test names.
-
-Problems appear in the report, and as a note on cell A1 of the Services tab. The note clears itself once the table is fixed. A note someone else has put on A1 is never overwritten, and the report says so instead.
+Problems appear in the report, and as a note on cell A1 of the Services tab. The note clears itself once the table is fixed. A note someone else has put on A1 is never overwritten, and the report says so instead. In a preview, the note is not written.
 
 ### Flags on the sheet
-
+ 
 | What you see | What it means | Does it clear itself? |
 |---|---|---|
+| An orange Comments cell, with a note | A line in the comment couldn't be used, or something about the case's tests needs attention. Each line of the note says what and why. | Yes, once the comment is fixed and the sweep runs again |
 | A yellow row, with a note on the Case ID cell saying "Duplicate entry received" | The same case arrived again. Details from the PDF were refreshed, and Provider, Psychometrist, and Comments were left alone. | No. Clear it by hand, or it goes when the case moves to Finished. |
-| An orange Comments cell, with a note | A line in the comment couldn't be used. | Yes, once the comment is fixed and the sweep runs again. Deleting the comment text entirely leaves the flag behind, which is a known gap. |
-| A note on the top-left cell of the Services tab | A problem with the Services table. | Yes, once the table is fixed and the sweep runs again. |
-
+| A note on the top-left cell of the Services tab | A problem with the Services table. | Yes, once the table is fixed and the sweep runs again |
+ 
+**What the lines in a Comments note mean**
+ 
+| The line says | Meaning, and what to do |
+|---|---|
+| `... (skipped: unknown test 'wisk', did you mean WISC?)` | A test name isn't in the Services tab. Fix the spelling, or add the test to the tab. |
+| `Add: X  (skipped: X is already on this case)` | The case already has that test. Delete the line. |
+| `Change: X to Y  (skipped: X isn't on this case)` | The test to swap isn't on the case at that point. Fix the line, or its order. |
+| `... (kept: the cell has it from an earlier change, but this comment no longer includes it. ...)` | A change was applied before, and its line is gone from the comment. The test stays. Put the line back to keep it as a change, or delete the test's line from the cell to remove it. |
+| `... (kept: the cell has this line, but it isn't in the PDF's list or this comment. ...)` | Someone typed a line into the cell. It stays. Add it to the comment to keep it as a change, or delete it from the cell. |
+| `... (dropped: ...)` | An earlier change conflicts with the new comment, so it was removed from the cell. The reason is in the line. |
+| `Services Requested  (not changed: ...)` | The case's tests were left alone. The reason says why: a line in the cell can't be read, the original tests weren't saved and the cell is already changed, the case has no tests recorded, the saved original belongs to a different case, or saving the original failed. |
+ 
+A comment that was cleared completely, while its changes still show in the cell, also gets an orange Comments cell, with `kept` lines, although the cell is empty. Put the lines back, or delete the tests from the cell, and it clears.
+ 
 The sheet's own flags only ever set a background color and a note. They never change text color, so OA's blue and red markings for attended and no-show cases are left alone.
-
+ 
 To clear a duplicate flag: select the row, then Fill color, then Reset, then right-click the Case ID cell and choose Delete note. Don't use "Clear formatting", which also removes the text colors.
-
-If a case needs removing, delete its row. Clearing its cells leaves the fill and notes behind.
+ 
+If a case needs removing, delete its row. Clearing its cells leaves the fill and notes behind, and a stale hidden entry too.
+ 
+A flagged comment that is deleted entirely, when nothing has been applied to the case, keeps its orange fill and note. That is a known gap.
 
 ## Screenshot Matcher
 
@@ -646,7 +771,7 @@ python -m pytest -v
 
 Use `python -m pytest`, not plain `pytest`, so the project root is on the import path.
 
-The tests run in memory. They need no Dropbox or Google credentials, because the Google Sheets code takes the sheet as a parameter and the tests hand it a stand-in from `tests/fakes.py`. They cover the comment parser, the Services lookup and its tab, the sweep, adding and moving cases, the console report, the schedule sort, and the PDF pipeline.
+The tests run in memory. They need no Dropbox or Google credentials, because the Google Sheets code takes the sheet as a parameter and the tests hand it a stand-in from `tests/fakes.py`. They cover the comment parser, the Services lookup and its tab, reading and writing the Services Requested cell, applying test changes, the sweep and its preview mode, adding and moving cases, the console report, the sweep's command line, the schedule sort, and the PDF pipeline.
 
 `tests/test_local_pipeline.py` runs the real extraction and report code against sample PDFs. It needs the local-only `templates/` and `testing pdfs/` folders and skips itself, with a reason, when they are missing.
 
@@ -684,14 +809,23 @@ python -c "from app.pdf_extractor import extract_schedule_data as e; [print(k, v
 ```
 
 ### Trying the sheet by hand
-
+ 
 Use your own sandbox sheet, never the production one.
-
+ 
 1. Add a case: `python -m app.ongoing_row_mapper`, with a sample PDF.
-2. Type a note in that case's Comments cell, for example `Provider: Dr. Doe`.
-3. Run the sweep: `python -m app.apply_comment_updates`.
-4. Check the Provider column and read the report.
-5. Make a deliberate typo in the comment, such as `Provder:`, and run the sweep again. The Comments cell should turn orange with a note that suggests the right spelling.
+2. Type a note in that case's Comments cell, for example:
+ 
+```text
+Provider: Dr. Doe
+Add: wms
+```
+ 
+3. Preview the sweep: `python -m app.apply_comment_updates`. It writes nothing. Read the report, and check that the sheet didn't change.
+4. Apply it: `python -m app.apply_comment_updates --live`. The Provider column is filled, the Services Requested cell has a new last line ending in `(added)`, and the Comments cell is not orange.
+5. Run `--live` again. It should write nothing and say `Tests: already up to date, no change`.
+6. Make a deliberate typo in the comment, such as `Provder:`, and run the sweep again. The Comments cell should turn orange with a note that suggests the right spelling.
+ 
+For the full set of checks after a change to the sweep, including rewritten and cleared comments, rows that move, and cases that can't be updated, follow [docs/manual_check_apply_test_changes.md](docs/manual_check_apply_test_changes.md).
 
 ## Troubleshooting
 
@@ -771,6 +905,31 @@ The tab must be named exactly `Services`. The sweep still runs without it, and f
 
 See [Flags on the sheet](#flags-on-the-sheet) for what each one means and how to clear it.
 
+**The sweep ran but nothing changed**
+ 
+The command previews by default, and the report starts with `DRY RUN`. Run it again with `--live`.
+ 
+**`Test changes can't be applied: the Ongoing tab has no 'Services Requested' column`**
+ 
+The Ongoing tab needs a `Services Requested` header to apply test changes. It was probably renamed or removed. See [Tabs and columns](#tabs-and-columns). Provider and Psychometrist still apply.
+ 
+**A test in a comment isn't being added or swapped**
+ 
+Check these, in order:
+ 
+1. The line is in `Add:` or `Change: X to Y` form, and the case's row has a Case ID.
+2. The Comments cell is orange. If so, its note says why: an unknown name, a change that doesn't fit the case, or `not changed`.
+3. The report doesn't say the Services tab couldn't be loaded.
+4. The sweep was run with `--live`.
+ 
+**`Services Requested  (not changed: ...)` in a Comments note**
+ 
+The sweep deliberately left that case's tests alone. The reason follows `not changed`, and [Flags on the sheet](#flags-on-the-sheet) lists each one: a line in the cell that can't be read, original tests that weren't saved while the cell already shows changes, a case with no tests recorded, a saved original that belongs to a different case, or a save that failed.
+ 
+**A test deleted from the comment is still in the cell**
+ 
+That's deliberate. Tests are only ever added or swapped, so a deleted line keeps its test and flags the comment. Put the line back to keep it, or delete the test's line from the cell to remove it.
+
 ## Security
 
 This repository is public. Treat everything committed to it as visible to anyone, permanently.
@@ -800,16 +959,19 @@ Use your own Dropbox app and your own copy of the sheet while developing. Produc
 - If the schedule table changes, update the headers and row generation in `app/schedule_generator.py`.
 - If template placeholders change, update the replacements in `app/template_filler.py`.
 - The Services tab can be edited with no code change. Add rows and aliases there.
+- Fill the Services tab's `Name` column with the text a PDF prints after the code, copied from a real PDF, for the tests OA is likely to add. It becomes the description on lines the sweep adds.
+- If you change how test changes are applied (the markers, the refusal rules, or the wording of a flag), update the tests, "How test changes are applied", "Flags on the sheet", and `docs/manual_check_apply_test_changes.md` together.
 - Test editions change over time, and a mismatch is the first thing to check when a test isn't recognized. Trinity Tree gives the current edition of a test even when a referral lists an older one, so a PDF can show an older code than the test actually given. How newer editions should appear in the Services tab is still being decided.
 - The sheet layout is a draft. Check [Tabs and columns](#tabs-and-columns) before renaming a header.
 
 **Known gaps**
-
+ 
 - The DOCX pipeline and the sheet are not connected. Cases are added to the sheet by hand.
-- Test changes are checked but not written into the sheet.
-- A flagged comment whose text is deleted entirely keeps its orange fill and note.
-- The sweep ends with a "Press Enter to close" prompt, which would hang a scheduled run.
+- The sweep and the screenshot matcher print their reports to the console only. Nothing is logged, so a scheduled run's report would be lost. This needs fixing before either is scheduled.
+- A flagged comment that is deleted entirely, when nothing has been applied to the case, keeps its orange fill and note.
 - A PDF whose case ID can't be read is written to the sheet as a row with a blank Case ID.
+- A move to Finished writes the case there before deleting it from Ongoing, so if it fails in between and is run again, the case can be added to Finished twice.
+- The screenshot matcher's own limits are listed in its section.
 
 ### Contributing
 

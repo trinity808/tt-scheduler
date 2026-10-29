@@ -28,7 +28,8 @@ A line in the cell that neither the original nor the comment accounts for is
 kept, and the comment is flagged. A comment accounts for a test if it mentions
 it anywhere, even to swap it away or back again, so an explicit change back is
 respected. This happens when OA rewrites her comment from scratch, or types a
-line into the cell by hand. The cell's marker says what the
+line into the cell by hand. The flag says which: a line carrying a marker is "from
+an earlier change", and one without a marker was typed in. The cell's marker says what the
 line was: an "(added)" line becomes an implied Add, and a "(changed from X)"
 line becomes an implied Change of X, applied after the comment's own changes so
 it keeps its place. If an implied change no longer fits, for example the
@@ -111,14 +112,18 @@ def build_final_services(original_codes, changes, cell_text, lookup=None):
     }
     explained = set(original_codes) | set(computed.codes()) | mentioned
     implied = []
+    typed_by_hand = set()  # ids of implied changes from lines with no marker
     for line in parsed.lines:
         if line.code in explained:
             continue
         explained.add(line.code)
         if line.marker == "changed":
-            implied.append(ServiceChange("change", line.code, replaces=line.changed_from))
+            change = ServiceChange("change", line.code, replaces=line.changed_from)
         else:
-            implied.append(ServiceChange("add", line.code))
+            change = ServiceChange("add", line.code)
+            if not line.marker:
+                typed_by_hand.add(id(change))
+        implied.append(change)
 
     final = compute_services(original_codes, changes + implied) if implied else computed
 
@@ -129,7 +134,13 @@ def build_final_services(original_codes, changes, cell_text, lookup=None):
     ]
     for change in implied:
         skipped = next((s for s in final.skipped if s.change is change), None)
-        if skipped is None:
+        if skipped is None and id(change) in typed_by_hand:
+            flags.append(
+                f"{change_label(change)}  (kept: the cell has this line, but it "
+                "isn't in the PDF's list or this comment. Add it to the comment to "
+                "keep it as a change, or delete it from the cell to remove it)"
+            )
+        elif skipped is None:
             flags.append(
                 f"{change_label(change)}  (kept: the cell has it from an earlier "
                 "change, but this comment no longer includes it. Put the line back "

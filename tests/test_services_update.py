@@ -384,3 +384,34 @@ def test_the_inputs_are_not_modified():
     build_final_services(original, changes, PDF_CELL, LOOKUP)
     assert original == ORIGINAL
     assert changes == [add(CARS), change(WISC, WAIS)]
+
+
+# --- The kept message says where the line came from -----------------
+
+
+def test_a_line_typed_by_hand_is_not_said_to_come_from_an_earlier_change():
+    cell = PDF_CELL + "\n____________________\n4. 96130-CARS-2 - typed by hand"
+    flag = run(cell=cell).flags[0]
+    assert flag.startswith(f"Add: {CARS}  (kept:")
+    assert "isn't in the PDF's list or this comment" in flag
+    assert "earlier change" not in flag
+
+
+def test_an_applied_line_the_comment_forgot_still_says_it_came_from_an_earlier_change():
+    flag = run(cell=run(add(CARS)).text).flags[0]
+    assert "from an earlier change" in flag
+    assert "isn't in the PDF's list" not in flag
+
+
+def test_a_forgotten_swap_says_it_came_from_an_earlier_change():
+    flag = run(cell=run(change(WISC, WAIS)).text).flags[0]
+    assert flag.startswith(f"Change: {WISC} to {WAIS}  (kept:")
+    assert "from an earlier change" in flag
+
+
+def test_each_kept_line_gets_the_wording_that_fits_it():
+    cell = run(add(CARS)).text + "\n____________________\n5. 96101-WIAT-III - typed by hand"
+    flags = run(cell=cell).flags
+    assert len(flags) == 2
+    assert "from an earlier change" in flags[0] and CARS in flags[0]
+    assert "isn't in the PDF's list" in flags[1] and WIAT in flags[1]
