@@ -96,57 +96,48 @@ def normalize_name(value):
 
     return value
 
+
 def patient_name_to_claimant_folder(patient_name):
     """
-    Converts Patient Name from Google Sheets into
-    Dropbox's LastNameFirstName format.
+    Convert Google Sheets Patient Name to
+    Dropbox LastNameFirstName format.
 
-    Examples:
-
-        Anand Khanna
-        -> KhannaAnand
-
-        Anand R. Khanna
-        -> KhannaAnand
-
-        Khanna, Anand
-        -> KhannaAnand
-
-        James O'Brien
-        -> O'BrienJames
+    Supports:
+    John Smith -> SmithJohn
+    John Michael Smith -> SmithJohn
+    John Michael David Smith -> SmithJohn
+    Khanna, Anand Michael -> KhannaAnand
     """
+    if patient_name is None:
+        return ""
 
     patient_name = str(patient_name).strip()
 
     if not patient_name:
         return ""
 
-    # Handle:
-    # Khanna, Anand
+    # Format: LastName, FirstName MiddleNames
     if "," in patient_name:
         last_name, remainder = patient_name.split(",", 1)
+        parts = remainder.strip().split()
 
-        name_parts = remainder.strip().split()
-
-        if not name_parts:
+        if not last_name.strip() or not parts:
             return ""
 
-        first_name = name_parts[0]
+        first_name = parts[0]
 
-        return f"{last_name.strip()}{first_name}"
+    else:
+        # Format: FirstName MiddleNames LastName
+        parts = patient_name.split()
 
-    # Handle:
-    # Anand Khanna
-    # Anand R. Khanna
-    parts = patient_name.split()
+        if len(parts) < 2:
+            return ""
 
-    if len(parts) < 2:
-        return ""
+        first_name = parts[0]
+        last_name = parts[-1]
 
-    first_name = parts[0]
-    last_name = parts[-1]
+    return normalize_name(last_name + first_name)
 
-    return f"{last_name}{first_name}"
 
 # =========================================================
 # DATE HELPERS
