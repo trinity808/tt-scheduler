@@ -915,6 +915,34 @@ def move_matches(dry_run=True):
             }
         )
 
+
+    # =====================================================
+    # PREVENT DUPLICATE SCREENSHOT MATCHES
+    # =====================================================
+
+    from collections import Counter
+
+    screenshot_counts = Counter(
+        match["screenshot_path"].casefold()
+        for match in matches_to_move
+    )
+
+    safe_matches = []
+
+    for match in matches_to_move:
+        screenshot_key = match["screenshot_path"].casefold()
+
+        if screenshot_counts[screenshot_key] > 1:
+            print(
+                "SKIP: Multiple cases matched screenshot:",
+                match["screenshot_path"]
+            )
+            continue
+
+        safe_matches.append(match)
+
+    matches_to_move = safe_matches
+
     # =====================================================
     # NO MATCHES
     # =====================================================
