@@ -241,7 +241,7 @@ Settings:
 - `adult_template_path`: path to the adult DOCX template.
 - `child_template_path`: path to the child DOCX template.
 - `generated_docs_folder`: local folder for filled report documents.
-- `health_check.log_folder`: folder for scheduler logs.
+- `health_check.log_folder`: folder for scheduler logs, the sweep's included.
 - `health_check.email_notifications_enabled`: turns failure emails on or off. Off by default.
 - `health_check.email_subject_prefix`: prefix added to failure email subjects.
 
@@ -350,13 +350,13 @@ The sweep (`python -m app.apply_comment_updates`) can be scheduled the same way,
  
 - **Program/script:** the full path to the virtual environment's Python, as above
 - **Add arguments:** `-m app.apply_comment_updates --live`
-- **Start in:** the project root, which `-m` needs to find `app/`
+- **Start in:** the project root. `-m` needs it to find `app/`, and the sweep reads `config/settings.json` from there.
  
 Two rules. Never add `--pause`, which makes the run wait for a key nobody will press. And the arguments must include `--live`, since without it the command only previews and writes nothing.
  
 Before scheduling it:
  
-- **Its report is only printed.** The sweep doesn't use the logger, so a scheduled run's report would be lost. Fix that first (see Known gaps), or the scheduled runs can't be checked.
+- **Read its log, not the console.** A scheduled run prints nowhere anyone sees. Its report goes to `logs/sweep.log`, and a failure also goes to `logs/sweep_error.log` and makes the task's Last Run Result non-zero. Check there after the first scheduled runs.
 - **Run it by hand first,** as a preview and then with `--live`, against the sheet it will run on.
 - **It is safe to repeat.** A rerun on an unchanged sheet writes nothing, so the interval can be short. How often OA's comments should be picked up is still to be decided.
  
@@ -405,7 +405,22 @@ The Python logger writes the first two itself, in rotating files with a 2 MB lim
 
 Only logger output reaches these files. Some low-level messages in `apis/dropbox_api.py`, such as the upload and move confirmations, are plain `print` calls. They appear on the console but not in the log, and the run's own log lines already record the same steps. The macOS shell script also appends the console output to the same files, which has not been tested.
 
-The sweep and the screenshot matcher don't use this logger. They print their reports to the console, so nothing about their runs reaches `logs/`. That is fine when someone runs them by hand. For a scheduled run it means the report is lost. This is listed under Known gaps.
+The sweep writes its own files in the same folder, so that two processes never share a rotating file. Rotating a file that another process has open can fail on Windows, and the record being written is lost.
+ 
+```text
+logs/sweep.log          everything from INFO up
+logs/sweep_error.log    failures only
+```
+ 
+Each run logs when it started and in which mode (`live` or `preview`), the whole report as a single record, and a one-line finish with counts and how long it took:
+ 
+```text
+2026-10-30 11:33:05,209 | INFO | trinity_scheduler | Sweep finished (live): 6 comment(s), 0 field(s) updated, 2 flagged, 7.9s
+```
+ 
+A run with any flagged case is logged at WARNING and says how many, so those runs stand out. A failure is logged with its traceback, the alert email is sent if emails are enabled, and the command exits with an error, so Task Scheduler's Last Run Result shows it. If `config/settings.json` can't be read, the sweep logs a warning and uses a `logs/` folder in the folder it was started in.
+ 
+The report has Case IDs, staff names, and test codes, and no claimant names. The screenshot matcher does not log. It prints its output, which includes patient names, to the console only. That is listed under Known gaps.
 
 When email alerts are enabled in `config/settings.json`, a failed PDF or a fatal run failure sends an email using the SMTP values in `.env`. They are off by default. The SMTP settings use a plain username and password, so a Gmail account needs an app password. Microsoft 365 mailboxes no longer accept that kind of login and would need a different approach.
 
@@ -570,7 +585,7 @@ Flagged cases: 15419898
 - It describes what **this run** changed, compared with the cell as it was, not what the cell says now. A case that was already current says `Tests: already up to date, no change`.
 - `Original tests saved from the sheet` means nothing was stored for that case, so its clean cell was taken as the original (see [Stored original tests](#stored-original-tests)).
 - A preview opens with `DRY RUN: nothing was written to the sheet.`, uses "would be" throughout, skips the note on the Services tab and says so, and ends with the command that applies it.
-The report is printed on the console only. Nothing is written to a log file, so the report of a scheduled run would be lost. This is listed under Known gaps.
+Every run, previews included, is also written to `logs/sweep.log`, labeled with its mode, so what a scheduled run did can be read afterwards. See [Logs and Alerts](#logs-and-alerts).
 
 ### How test changes are applied
  
@@ -930,6 +945,18 @@ The sweep deliberately left that case's tests alone. The reason follows `not cha
  
 That's deliberate. Tests are only ever added or swapped, so a deleted line keeps its test and flags the comment. Put the line back to keep it, or delete the test's line from the cell to remove it.
 
+**I can't tell what a scheduled sweep did**
+ 
+Read `logs/sweep.log`. Each run has a `Sweep started` line, the report, and a `Sweep finished` line. A start with no finish means it failed or is still running. Failures, with their traceback, are also in `logs/sweep_error.log`. In Task Scheduler, the task's Last Run Result shows a non-zero value when the run failed.
+ 
+**`Could not read config/settings.json` in `sweep.log`**
+ 
+The sweep was started somewhere other than the project root, so it couldn't find the settings. It still ran, but it logged to a `logs/` folder in the wrong place, and email alerts were off for that run. In a scheduled task, set "Start in" to the project root.
+ 
+**`sweep.log` is growing quickly**
+ 
+A case that stays flagged is logged in full, with the whole report, on every run until someone fixes it. The note on its Comments cell says how. See Known gaps.
+
 ## Security
 
 This repository is public. Treat everything committed to it as visible to anyone, permanently.
@@ -963,11 +990,14 @@ Use your own Dropbox app and your own copy of the sheet while developing. Produc
 - If you change how test changes are applied (the markers, the refusal rules, or the wording of a flag), update the tests, "How test changes are applied", "Flags on the sheet", and `docs/manual_check_apply_test_changes.md` together.
 - Test editions change over time, and a mismatch is the first thing to check when a test isn't recognized. Trinity Tree gives the current edition of a test even when a referral lists an older one, so a PDF can show an older code than the test actually given. How newer editions should appear in the Services tab is still being decided.
 - The sheet layout is a draft. Check [Tabs and columns](#tabs-and-columns) before renaming a header.
+- A new command that logs should give `setup_logging` its own file names, as the sweep does. Two processes must not write to one rotating file.
 
 **Known gaps**
  
 - The DOCX pipeline and the sheet are not connected. Cases are added to the sheet by hand.
-- The sweep and the screenshot matcher print their reports to the console only. Nothing is logged, so a scheduled run's report would be lost. This needs fixing before either is scheduled.
+- The screenshot matcher prints its output to the console only, so a scheduled run of it would leave no record. Its output includes patient names, so what to log, and where, needs a decision.
+- Nothing stops two sweeps running at once. A sweep that takes longer than its interval could overlap the next one, and the two would write to the same log file and the same sheet. A lock file, like the DOCX pipeline's, would prevent it.
+- A case that stays flagged is logged in full, with the whole report, on every run. At short intervals the log grows quickly (about 1 KB a run for two flagged cases). Logging the full report only when it changes would fix it.
 - A flagged comment that is deleted entirely, when nothing has been applied to the case, keeps its orange fill and note.
 - A PDF whose case ID can't be read is written to the sheet as a row with a blank Case ID.
 - A move to Finished writes the case there before deleting it from Ongoing, so if it fails in between and is run again, the case can be added to Finished twice.
