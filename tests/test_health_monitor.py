@@ -2,8 +2,7 @@
 Tests for the logging setup in app/health_monitor.py.
 
 The logger is shared by the whole process, so each test starts and ends with
-it clean. Handlers are closed as well as removed, because Windows can't delete
-a temporary folder while a log file in it is still open.
+it clean (see tests/log_cleanup.py).
 
 The logger doesn't pass records up to the root logger, so pytest's caplog
 can't see them. These tests read the log files instead.
@@ -18,26 +17,7 @@ from logging.handlers import RotatingFileHandler
 import pytest
 
 from app.health_monitor import get_logger, setup_logging
-
-
-def file_handlers():
-    return [h for h in get_logger().handlers if isinstance(h, RotatingFileHandler)]
-
-
-@pytest.fixture(autouse=True)
-def clean_logger():
-    # Only the file handlers are ours to remove. pytest attaches its own
-    # capture handlers to this logger while a test runs, and leaves them to
-    # pytest.
-    def reset():
-        logger = get_logger()
-        for handler in file_handlers():
-            handler.close()
-            logger.removeHandler(handler)
-
-    reset()
-    yield
-    reset()
+from tests.log_cleanup import clean_logger, file_handlers  # noqa: F401
 
 
 def config_for(folder):

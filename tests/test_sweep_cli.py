@@ -16,6 +16,7 @@ from app.case_metadata import set_case_tests
 from app.services_cell import ServiceLine, render_services_cell
 from tests.fake_metadata import FakeMetadataClient
 from tests.fakes import FakeSpreadsheet, FakeWorksheet
+from tests.log_cleanup import clean_logger  # noqa: F401
 
 
 WISC = "96101-WISC-V"
@@ -45,6 +46,16 @@ def setup():
     client = FakeMetadataClient()
     set_case_tests(client, 2, "111", [WISC, PSYCH])
     return spreadsheet, ongoing, client
+
+
+@pytest.fixture(autouse=True)
+def scratch_folder(tmp_path, monkeypatch):
+    """
+    Run in an empty folder. The command now reads config/settings.json and
+    writes its log files from the working directory, and a test must never
+    leave log files in the real project.
+    """
+    monkeypatch.chdir(tmp_path)
 
 
 class Terminal:
