@@ -55,6 +55,14 @@ Run from the command line:
     python -m app.apply_comment_updates --live   apply for real
     add --pause to wait for Enter at the end ("Press Enter to close"),
     for a double-clicked shortcut whose window would otherwise vanish.
+It writes logs/sweep.log, and logs/sweep_error.log for failures: when it
+started and in which mode, the whole report as one record (a warning if any
+case needs attention), and when it finished, with counts. A failure is logged
+with its traceback, the usual alert email is sent if emails are enabled, and
+the error is raised again, so the process still exits with an error. These are
+separate from the DOCX pipeline's files, since two processes must not write to
+one rotating file. The report is also printed, as always.
+
 It never waits unless --pause is given. Whether standard input "is a
 terminal" can't be trusted to decide this: on Windows an empty input
 counts as one, and so does the console a scheduled task is given. A
@@ -69,6 +77,9 @@ current state, not a one-time event.
 """
 
 import argparse
+import logging
+import sys
+import time
 from dataclasses import dataclass
 
 from gspread.utils import rowcol_to_a1
@@ -79,6 +90,8 @@ from app.case_metadata import (
     set_case_tests,
 )
 from app.comment_parser import parse_comment
+from app.config_loader import load_config
+from app.health_monitor import notify_error, setup_logging
 from app.services_cell import parse_services_cell
 from app.services_tab import ServicesTab, flag_services_tab, load_services_tab
 from app.services_update import build_final_services
@@ -86,6 +99,8 @@ from app.sheet_client import get_header_map, update_case_field
 
 
 ONGOING_TAB = "Ongoing"
+SWEEP_LOG = "sweep.log"
+SWEEP_ERROR_LOG = "sweep_error.log"
 SERVICES_COLUMN = "Services Requested"
 
 
@@ -325,14 +340,14 @@ def run_sweep(spreadsheet, metadata=None, dry_run=False):
     )
 
 
-def main(argv=None, spreadsheet=None, metadata=None, pause=None):
+def main(argv=None, spreadsheet=None, metadata=None, pause=None, config=None):
     """
-    The command line: sweep the Ongoing tab and print a report.
+    The command line: sweep the Ongoing tab, print a report, and log the run.
 
-    Previews by default, and writes only with --live. `spreadsheet` and
-    `metadata` are for tests; left out, they are the real ones. `pause`
-    decides whether to wait for Enter at the end; left out, it follows the
-    --pause flag, which is off unless given.
+    Previews by default, and writes only with --live. `spreadsheet`,
+    `metadata`, and `config` are for tests; left out, they are the real ones.
+    `pause` decides whether to wait for Enter at the end; left out, it follows
+    the --pause flag, which is off unless given.
     """
     parser = argparse.ArgumentParser(
         description=(
@@ -351,19 +366,55 @@ def main(argv=None, spreadsheet=None, metadata=None, pause=None):
         help="Wait for Enter before closing, so a double-clicked window stays open.",
     )
     args = parser.parse_args(argv)
+    mode = "live" if args.live else "preview"
 
-    if spreadsheet is None:
-        from app.sheet_client import get_client
+    # Logging comes first, so even a failure to read the settings or to reach
+    # Google leaves a trace.
+    config_problem = None
+    if config is None:
+        try:
+            config = load_config()
+        except Exception as error:
+            config, config_problem = {}, error
+    logger = setup_logging(config, SWEEP_LOG, SWEEP_ERROR_LOG)
+    if config_problem:
+        logger.warning(
+            "Could not read config/settings.json (%s), so the default log "
+            "folder is used.",
+            config_problem,
+        )
+    logger.info("Sweep started (%s)", mode)
+    started = time.monotonic()
 
-        spreadsheet = get_client()
-    if metadata is None:
-        from app.sheets_metadata_client import SheetsMetadataClient
+    try:
+        if spreadsheet is None:
+            from app.sheet_client import get_client
 
-        metadata = SheetsMetadataClient(spreadsheet.worksheet(ONGOING_TAB))
+            spreadsheet = get_client()
+        if metadata is None:
+            from app.sheets_metadata_client import SheetsMetadataClient
 
-    from app.sweep_report import format_report
+            metadata = SheetsMetadataClient(spreadsheet.worksheet(ONGOING_TAB))
 
-    print(format_report(run_sweep(spreadsheet, metadata, dry_run=not args.live)))
+        from app.sweep_report import format_report, summary_counts, summary_line
+
+        report = run_sweep(spreadsheet, metadata, dry_run=not args.live)
+        text = format_report(report)
+
+        flagged = summary_counts(report).flagged
+        if flagged:
+            logger.warning(
+                "Sweep report (%s), %s case(s) need attention:\n%s", mode, len(flagged), text
+            )
+        else:
+            logger.info("Sweep report (%s):\n%s", mode, text)
+        logger.info(summary_line(report, time.monotonic() - started))
+
+        print(text)
+    except Exception as error:
+        logger.exception("Sweep failed (%s)", mode)
+        notify_error("Sweep failed", f"The sweep failed ({mode}): {error}", config, sys.exc_info())
+        raise
 
     if pause is None:
         pause = args.pause

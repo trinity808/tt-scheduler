@@ -249,3 +249,34 @@ def format_report(report):
     sections.append(summary_lines)
 
     return "\n\n".join("\n".join(section) for section in sections)
+
+
+def summary_line(report, seconds):
+    """
+    One line saying what a run did, for a log. It uses the same counts as the
+    report's summary, so the two can't disagree.
+    """
+    counts = summary_counts(report)
+    dry_run = getattr(report, "dry_run", False)
+
+    parts = [
+        f"{counts.comments} comment(s)",
+        f"{counts.fields_updated} field(s) {'would be updated' if dry_run else 'updated'}",
+        f"{len(counts.flagged)} flagged",
+    ]
+    if counts.changes_found:
+        parts.append(f"{counts.changes_found} test change(s) found, not applied")
+    if counts.tests_updated:
+        parts.append(
+            f"{counts.tests_updated} case(s) with tests "
+            f"{'that would be updated' if dry_run else 'updated'}"
+        )
+    if counts.originals_saved:
+        parts.append(
+            f"{counts.originals_saved} original list(s) "
+            f"{'that would be saved' if dry_run else 'saved'}"
+        )
+    parts.append(f"{seconds:.1f}s")
+
+    mode = "preview" if dry_run else "live"
+    return f"Sweep finished ({mode}): " + ", ".join(parts)

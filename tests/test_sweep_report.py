@@ -7,7 +7,7 @@ from app.comment_parser import ParsedComment, ServiceChange
 from app.services_cell import ServiceLine
 from app.services_tab import SERVICES_TAB, ServicesTab
 from app.services_update import ServicesUpdate
-from app.sweep_report import APPLY_COMMAND, format_report, summary_counts
+from app.sweep_report import APPLY_COMMAND, format_report, summary_counts, summary_line
 from tests.fakes import FakeSpreadsheet, FakeWorksheet
 
 
@@ -549,3 +549,44 @@ def test_every_number_in_the_summary_comes_from_the_counts():
     assert f"{counts.originals_saved} original list(s) saved." in text
     assert f"{counts.changes_found} test change(s) found, not applied to the sheet yet." in text
     assert "Flagged cases: " + ", ".join(counts.flagged) in text
+
+
+# --- The one-line summary for a log ---------------------------------
+
+
+def test_the_log_line_for_a_live_run():
+    line = summary_line(summary_report(dry_run=False), 2.5)
+    assert line == (
+        "Sweep finished (live): 3 comment(s), 1 field(s) updated, 1 flagged, "
+        "1 test change(s) found, not applied, 1 case(s) with tests updated, "
+        "1 original list(s) saved, 2.5s"
+    )
+
+
+def test_the_log_line_for_a_preview_says_would():
+    line = summary_line(summary_report(dry_run=True), 2.5)
+    assert line == (
+        "Sweep finished (preview): 3 comment(s), 1 field(s) would be updated, 1 flagged, "
+        "1 test change(s) found, not applied, 1 case(s) with tests that would be updated, "
+        "1 original list(s) that would be saved, 2.5s"
+    )
+
+
+def test_the_log_line_leaves_out_parts_that_are_zero():
+    assert summary_line(report(), 0.0) == (
+        "Sweep finished (live): 0 comment(s), 0 field(s) updated, 0 flagged, 0.0s"
+    )
+
+
+@pytest.mark.parametrize("seconds, shown", [(0.04, "0.0s"), (4.84, "4.8s"), (61.26, "61.3s")])
+def test_the_duration_is_shown_to_a_tenth_of_a_second(seconds, shown):
+    assert summary_line(report(), seconds).endswith(f", {shown}")
+
+
+def test_the_log_line_and_the_report_agree():
+    report_ = summary_report(dry_run=False)
+    counts = summary_counts(report_)
+    line = summary_line(report_, 1.0)
+    text = format_report(report_)
+    assert f"{counts.comments} comment(s), {counts.fields_updated} field(s) updated, {len(counts.flagged)} flagged" in line
+    assert f"{counts.comments} comment(s) processed, {counts.fields_updated} field(s) updated, {len(counts.flagged)} flagged for attention." in text
