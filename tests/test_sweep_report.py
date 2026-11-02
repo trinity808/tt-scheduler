@@ -7,7 +7,7 @@ from app.comment_parser import ParsedComment, ServiceChange
 from app.services_cell import ServiceLine
 from app.services_tab import SERVICES_TAB, ServicesTab
 from app.services_update import ServicesUpdate
-from app.sweep_report import APPLY_COMMAND, format_report
+from app.sweep_report import APPLY_COMMAND, format_report, summary_counts, summary_line
 from tests.fakes import FakeSpreadsheet, FakeWorksheet
 
 
@@ -447,3 +447,146 @@ def test_the_summary_lines_are_together_and_in_order():
         "1 original list(s) saved.",
         "Flagged cases: 222",
     ]
+
+
+# --- The counts behind the summary ----------------------------------
+
+
+def test_a_report_with_nothing_in_it_counts_nothing():
+    counts = summary_counts(report())
+    assert (counts.comments, counts.fields_updated, counts.changes_found) == (0, 0, 0)
+    assert (counts.tests_updated, counts.originals_saved, counts.flagged) == (0, 0, [])
+
+
+def test_the_counts_for_a_mixed_run():
+    counts = summary_counts(summary_report(dry_run=False))
+    assert counts.comments == 3
+    assert counts.fields_updated == 1
+    assert counts.changes_found == 1       # case 333 was never applied
+    assert counts.tests_updated == 1       # case 111
+    assert counts.originals_saved == 1     # case 111
+    assert counts.flagged == ["222"]
+
+
+def test_a_preview_counts_the_same_as_a_live_run():
+    live = summary_counts(summary_report(dry_run=False))
+    preview = summary_counts(summary_report(dry_run=True))
+    assert live == preview
+
+
+def test_only_a_case_whose_tests_were_updated_counts_as_updated():
+    results = [
+        applied_result("1", "unchanged"),
+        applied_result("2", "refused", flags=["x"]),
+        applied_result("3", "store_failed", original_to_store=[WISC], flags=["x"]),
+        outcome_only("4", "none"),
+        outcome_only("5", "unusable_original"),
+    ]
+    assert summary_counts(report(results)).tests_updated == 0
+
+
+def test_an_original_that_failed_to_save_is_not_counted_as_saved():
+    counts = summary_counts(report([
+        applied_result("111", "store_failed", original_to_store=[WISC], flags=["x"]),
+    ]))
+    assert counts.originals_saved == 0
+    assert counts.flagged == ["111"]
+
+
+def test_an_original_saved_while_every_change_was_skipped_still_counts():
+    counts = summary_counts(report([
+        applied_result("111", "unchanged", original_to_store=[WISC], flags=["skipped"]),
+    ]))
+    assert counts.originals_saved == 1
+    assert counts.tests_updated == 0
+    assert counts.flagged == ["111"]
+
+
+def test_test_changes_found_counts_only_those_never_applied():
+    counts = summary_counts(report([
+        outcome_only("1", "not_applied", service_changes=[ServiceChange("add", CARS)] * 2),
+        applied_result("2", "updated", ORIGINAL_LINES, ORIGINAL_LINES,
+                       service_changes=[ServiceChange("add", CARS)]),
+    ]))
+    assert counts.changes_found == 2
+
+
+def test_fields_already_set_are_not_counted_as_updates():
+    counts = summary_counts(report([
+        result("1", fields={"Provider": ("unchanged", "X", "X"), "Psychometrist": ("updated", "", "Y")}),
+    ]))
+    assert counts.fields_updated == 1
+
+
+def test_a_result_built_the_old_way_is_counted():
+    counts = summary_counts(report([
+        result("111", fields={"Provider": ("updated", "", "X")}, unrecognized_lines=["bad  (skipped: y)"]),
+    ]))
+    assert counts.fields_updated == 1
+    assert counts.flagged == ["111"]
+    assert counts.tests_updated == counts.originals_saved == 0
+
+
+def test_flagged_cases_keep_the_order_of_the_results():
+    counts = summary_counts(report([
+        applied_result("30", "unchanged", flags=["x"]),
+        applied_result("10", "unchanged"),
+        applied_result("20", "refused", flags=["x"]),
+    ]))
+    assert counts.flagged == ["30", "20"]
+
+
+def test_every_number_in_the_summary_comes_from_the_counts():
+    report_ = summary_report(dry_run=False)
+    counts = summary_counts(report_)
+    text = format_report(report_)
+    assert (
+        f"{counts.comments} comment(s) processed, "
+        f"{counts.fields_updated} field(s) updated, "
+        f"{len(counts.flagged)} flagged for attention."
+    ) in text
+    assert f"{counts.tests_updated} case(s) had their tests updated." in text
+    assert f"{counts.originals_saved} original list(s) saved." in text
+    assert f"{counts.changes_found} test change(s) found, not applied to the sheet yet." in text
+    assert "Flagged cases: " + ", ".join(counts.flagged) in text
+
+
+# --- The one-line summary for a log ---------------------------------
+
+
+def test_the_log_line_for_a_live_run():
+    line = summary_line(summary_report(dry_run=False), 2.5)
+    assert line == (
+        "Sweep finished (live): 3 comment(s), 1 field(s) updated, 1 flagged, "
+        "1 test change(s) found, not applied, 1 case(s) with tests updated, "
+        "1 original list(s) saved, 2.5s"
+    )
+
+
+def test_the_log_line_for_a_preview_says_would():
+    line = summary_line(summary_report(dry_run=True), 2.5)
+    assert line == (
+        "Sweep finished (preview): 3 comment(s), 1 field(s) would be updated, 1 flagged, "
+        "1 test change(s) found, not applied, 1 case(s) with tests that would be updated, "
+        "1 original list(s) that would be saved, 2.5s"
+    )
+
+
+def test_the_log_line_leaves_out_parts_that_are_zero():
+    assert summary_line(report(), 0.0) == (
+        "Sweep finished (live): 0 comment(s), 0 field(s) updated, 0 flagged, 0.0s"
+    )
+
+
+@pytest.mark.parametrize("seconds, shown", [(0.04, "0.0s"), (4.84, "4.8s"), (61.26, "61.3s")])
+def test_the_duration_is_shown_to_a_tenth_of_a_second(seconds, shown):
+    assert summary_line(report(), seconds).endswith(f", {shown}")
+
+
+def test_the_log_line_and_the_report_agree():
+    report_ = summary_report(dry_run=False)
+    counts = summary_counts(report_)
+    line = summary_line(report_, 1.0)
+    text = format_report(report_)
+    assert f"{counts.comments} comment(s), {counts.fields_updated} field(s) updated, {len(counts.flagged)} flagged" in line
+    assert f"{counts.comments} comment(s) processed, {counts.fields_updated} field(s) updated, {len(counts.flagged)} flagged for attention." in text
