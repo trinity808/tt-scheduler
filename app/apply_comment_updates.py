@@ -63,6 +63,13 @@ the error is raised again, so the process still exits with an error. These are
 separate from the DOCX pipeline's files, since two processes must not write to
 one rotating file. The report is also printed, as always.
 
+A live run takes sweep.lock, in the working directory, for as long as it runs,
+and a second live run that finds it says so and exits quietly, with success,
+since an overlap is not a failure. Previews write nothing, so they take no lock
+and are never blocked. A lock older than sweep_lock_stale_minutes (15 by
+default, in config/settings.json) belongs to a run that died, and is taken over
+with a warning. See run_lock.py.
+
 It never waits unless --pause is given. Whether standard input "is a
 terminal" can't be trusted to decide this: on Windows an empty input
 counts as one, and so does the console a scheduled task is given. A
@@ -92,6 +99,7 @@ from app.case_metadata import (
 from app.comment_parser import parse_comment
 from app.config_loader import load_config
 from app.health_monitor import notify_error, setup_logging
+from app.run_lock import LockHeld, acquire, describe, minutes_from_config, release
 from app.services_cell import parse_services_cell
 from app.services_tab import ServicesTab, flag_services_tab, load_services_tab
 from app.services_update import build_final_services
@@ -99,6 +107,7 @@ from app.sheet_client import get_header_map, update_case_field
 
 
 ONGOING_TAB = "Ongoing"
+SWEEP_LOCK = "sweep.lock"
 SWEEP_LOG = "sweep.log"
 SWEEP_ERROR_LOG = "sweep_error.log"
 SERVICES_COLUMN = "Services Requested"
@@ -340,14 +349,53 @@ def run_sweep(spreadsheet, metadata=None, dry_run=False):
     )
 
 
+def _take_lock(logger, config):
+    """
+    The sweep's lock, or None if another live sweep holds it, which has been
+    logged and printed. Anything else that goes wrong, such as a folder that
+    can't be written to, is raised so the run fails visibly.
+    """
+    minutes, problem = minutes_from_config(config)
+    if problem:
+        logger.warning(problem)
+ 
+    try:
+        lock = acquire(SWEEP_LOCK, "live", minutes * 60)
+    except LockHeld as held:
+        logger.warning("Sweep skipped (live): another sweep is running (%s)", held)
+        print(f"Another live sweep is already running ({held}), so this run did nothing.")
+        return None
+ 
+    if lock.taken_over is not None:
+        logger.warning(
+            "Took over a stale sweep lock (%s), older than the %s-minute limit.",
+            describe(lock.taken_over, lock.taken_over_age),
+            minutes,
+        )
+    return lock
+ 
+ 
+def _release_lock(logger, lock):
+    """Gives the lock back. It must never raise, or it would hide a real error."""
+    try:
+        if not release(lock):
+            logger.warning(
+                "The sweep lock was no longer this run's when it finished. It "
+                "was probably taken over because this run outlasted the stale limit."
+            )
+    except Exception:
+        logger.exception("Could not release the sweep lock")
+ 
+ 
 def main(argv=None, spreadsheet=None, metadata=None, pause=None, config=None):
     """
     The command line: sweep the Ongoing tab, print a report, and log the run.
-
-    Previews by default, and writes only with --live. `spreadsheet`,
-    `metadata`, and `config` are for tests; left out, they are the real ones.
-    `pause` decides whether to wait for Enter at the end; left out, it follows
-    the --pause flag, which is off unless given.
+ 
+    Previews by default, and writes only with --live. A live run takes the
+    sweep lock first, and does nothing, successfully, if another live sweep
+    holds it. `spreadsheet`, `metadata`, and `config` are for tests; left out,
+    they are the real ones. `pause` decides whether to wait for Enter at the
+    end; left out, it follows the --pause flag, which is off unless given.
     """
     parser = argparse.ArgumentParser(
         description=(
@@ -367,7 +415,7 @@ def main(argv=None, spreadsheet=None, metadata=None, pause=None, config=None):
     )
     args = parser.parse_args(argv)
     mode = "live" if args.live else "preview"
-
+ 
     # Logging comes first, so even a failure to read the settings or to reach
     # Google leaves a trace.
     config_problem = None
@@ -383,24 +431,31 @@ def main(argv=None, spreadsheet=None, metadata=None, pause=None, config=None):
             "folder is used.",
             config_problem,
         )
-    logger.info("Sweep started (%s)", mode)
-    started = time.monotonic()
-
+ 
+    lock = None
     try:
+        if args.live:
+            lock = _take_lock(logger, config)
+            if lock is None:
+                return  # another live sweep is running: nothing to do, and no failure
+ 
+        logger.info("Sweep started (%s)", mode)
+        started = time.monotonic()
+ 
         if spreadsheet is None:
             from app.sheet_client import get_client
-
+ 
             spreadsheet = get_client()
         if metadata is None:
             from app.sheets_metadata_client import SheetsMetadataClient
-
+ 
             metadata = SheetsMetadataClient(spreadsheet.worksheet(ONGOING_TAB))
-
+ 
         from app.sweep_report import format_report, summary_counts, summary_line
-
+ 
         report = run_sweep(spreadsheet, metadata, dry_run=not args.live)
         text = format_report(report)
-
+ 
         flagged = summary_counts(report).flagged
         if flagged:
             logger.warning(
@@ -409,13 +464,16 @@ def main(argv=None, spreadsheet=None, metadata=None, pause=None, config=None):
         else:
             logger.info("Sweep report (%s):\n%s", mode, text)
         logger.info(summary_line(report, time.monotonic() - started))
-
+ 
         print(text)
     except Exception as error:
         logger.exception("Sweep failed (%s)", mode)
         notify_error("Sweep failed", f"The sweep failed ({mode}): {error}", config, sys.exc_info())
         raise
-
+    finally:
+        if lock is not None:
+            _release_lock(logger, lock)
+ 
     if pause is None:
         pause = args.pause
     if pause:

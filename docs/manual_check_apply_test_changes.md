@@ -259,6 +259,78 @@ python -m app.apply_comment_updates < /dev/null
 - [ ] `python -m app.apply_comment_updates --pause` ends with `Press Enter to close...` and waits for a key.
 - [ ] `python -m app.apply_comment_updates --pause < /dev/null` prints that line and finishes **without** a traceback.
 
+## 18. Two live sweeps at once
+ 
+Use `sweep.lock` in the project root. Note the size of `logs/sweep_error.log` first (`wc -c logs/sweep_error.log`).
+ 
+**A lock left by a dead process.** This takes the lock and exits without giving it back, which is what a crash leaves:
+ 
+```bash
+python -c "from app.run_lock import acquire; acquire('sweep.lock', 'live', 900)"
+cat sweep.lock
+```
+ 
+- [ ] The file holds JSON with a `pid`, `"mode": "live"`, a `started` time, and a `token`.
+ 
+**A preview is not blocked:**
+ 
+```bash
+python -m app.apply_comment_updates
+```
+ 
+- [ ] A normal report, opening with `DRY RUN`. The lock file is unchanged.
+ 
+**A live run is blocked:**
+ 
+```bash
+python -m app.apply_comment_updates --live
+echo "exit code: $?"
+grep -n "Sweep skipped\|Sweep started" logs/sweep.log | tail -3
+```
+ 
+- [ ] It prints `Another live sweep is already running (held by process N (live) since ..., X.X minutes old), so this run did nothing.`
+- [ ] `exit code: 0`, and `sweep.lock` is unchanged.
+- [ ] The log's last line is a WARNING, `Sweep skipped (live): another sweep is running (...)`, with no `Sweep started (live)` for that run.
+- [ ] `logs/sweep_error.log` has the size you noted. A skip is not a failure.
+ 
+**How old is old enough.** This sets the lock's age without waiting:
+ 
+```bash
+python -c "import os, time; t = time.time() - 14*60; os.utime('sweep.lock', (t, t))"
+python -m app.apply_comment_updates --live
+```
+ 
+- [ ] Blocked again, about `14.0 minutes old`, exit code 0.
+ 
+```bash
+python -c "import os, time; t = time.time() - 16*60; os.utime('sweep.lock', (t, t))"
+python -m app.apply_comment_updates --live
+ls sweep.lock
+grep -n "Took over" logs/sweep.log
+```
+ 
+- [ ] The run goes ahead and prints its report.
+- [ ] `ls sweep.lock` says there is no such file, since the new run gave its lock back.
+- [ ] The log has a WARNING, `Took over a stale sweep lock (...), 16.x minutes old), older than the 15-minute limit.`
+ 
+**Two processes starting together:**
+ 
+```bash
+python -m app.apply_comment_updates --live > a.txt 2>&1 & python -m app.apply_comment_updates --live > b.txt 2>&1; wait
+cat a.txt b.txt | grep -c "already running"
+ls sweep.lock
+rm a.txt b.txt
+```
+ 
+- [ ] The count is `1`: exactly one of the two was blocked. Repeat a few times. A `0` means the first finished before the second started, so try again. A `2` would be a bug.
+- [ ] `ls sweep.lock` says there is no such file.
+ 
+**An interrupted run.** Start `python -m app.apply_comment_updates --live` and press Ctrl+C a couple of seconds in, while it is talking to Google.
+ 
+- [ ] A `KeyboardInterrupt` traceback, and no `sweep.lock` left behind. A run killed harder, without cleanup, leaves the lock to heal after the limit, as in the first part of this scenario.
+ 
+Finish with `rm -f sweep.lock`.
+
 ---
 
 ## When something doesn't match
