@@ -237,7 +237,41 @@ def test_the_blocked_run_reports_how_old_the_lock_is(path):
     assert caught.value.age_seconds == pytest.approx(4 * 60)
 
 
+def test_a_lock_dated_a_moment_in_the_future_blocks_and_has_an_age_of_zero(path):
+    # On Windows a file's time can be a few milliseconds ahead of the clock.
+    take(path)
+    ahead = NOW + 0.05
+    os.utime(path, (ahead, ahead))
+    with pytest.raises(LockHeld) as caught:
+        acquire(path, "live", LIMIT, now=clock)
+    assert caught.value.age_seconds == 0
+    assert str(caught.value).endswith(", 0.0 minutes old")
+
+
+def test_the_last_resort_report_also_has_a_sane_age(path, monkeypatch):
+    # The lock keeps looking released and then turns out to exist, three times
+    # in a row. The run gives up and reports it, and that age must not be negative either.
+    take(path)
+    calls = {"n": 0}
+
+    def flickering(_path):
+        calls["n"] += 1
+        if calls["n"] <= run_lock._ATTEMPTS:
+            raise FileNotFoundError
+        return NOW + 0.05
+
+    monkeypatch.setattr(run_lock.os.path, "getmtime", flickering)
+    with pytest.raises(LockHeld) as caught:
+        acquire(path, "live", LIMIT, now=clock)
+    assert caught.value.age_seconds == 0
+
+
 # --- Describing a lock ----------------------------------------------
+
+
+def test_an_age_below_zero_is_described_as_zero():
+    assert describe({"pid": 7}, -3).endswith("0.0 minutes old")
+    assert "-" not in describe({"pid": 7}, -0.02)
 
 
 def test_a_lock_is_described_with_who_how_and_since_when():

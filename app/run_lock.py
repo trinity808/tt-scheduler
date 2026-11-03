@@ -87,6 +87,7 @@ class Lock:
 
 def describe(info, age_seconds):
     """A lock in words, for a log: who holds it, in which mode, since when."""
+    age_seconds = max(0.0, age_seconds)
     who = f"process {info['pid']}" if info.get("pid") else "an unknown process"
     mode = f" ({info['mode']})" if info.get("mode") else ""
     started = f" since {info['started']}" if info.get("started") else ""
@@ -104,7 +105,7 @@ def _read_info(path):
 
 def _age(path, now):
     try:
-        return now() - os.path.getmtime(path)
+        return max(0.0, now() - os.path.getmtime(path))
     except OSError:
         return 0.0
 
@@ -149,7 +150,10 @@ def acquire(path, mode, stale_after_seconds, now=time.time):
         except FileNotFoundError:
             continue  # it was released between our attempt and now: try again
 
-        age = now() - seen
+        # Never negative: on Windows a file's time can be a few milliseconds
+        # ahead of the clock, which would make a brand new lock look like it
+        # comes from the future.
+        age = max(0.0, now() - seen)
         info = _read_info(path)
         if age < stale_after_seconds:
             raise LockHeld(info, age)
