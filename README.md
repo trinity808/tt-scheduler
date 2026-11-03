@@ -56,6 +56,7 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 │   ├── health_monitor.py         # Logging, startup checks, email alerts
 │   ├── ongoing_row_mapper.py     # Maps an extracted PDF to an Ongoing row, adds or updates it
 │   ├── pdf_extractor.py          # PDF parsing and data extraction
+│   ├── run_lock.py               # A lock file with a stale limit, so two runs can't overlap
 │   ├── schedule_generator.py     # Daily schedule DOCX creation/update
 │   ├── screenshot_matcher.py     # Finds a provider's submitted screenshot in Dropbox and moves the case to Finished
 │   ├── service_changes.py        # Applies a comment's test changes to a case's original tests, in order
@@ -91,7 +92,7 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 └── scheduler local enabler steps.docx   # macOS scheduling guide
 ```
 
-Runtime folders such as `data/`, `logs/`, `reports/`, `.venv/`, `__pycache__/`, and `.env` stay out of GitHub.
+Runtime folders such as `data/`, `logs/`, `reports/`, `.venv/`, `__pycache__/`, and `.env` stay out of GitHub, and so do the lock files (`scheduler.lock`, `sweep.lock`).
 
 `templates/` and `testing pdfs/` are deliberately not in the repository either, since they may contain private claimant data. Ask a teammate for copies and place them at the project root. `main.py` needs the templates to run, and `tests/test_local_pipeline.py` skips itself when either folder is missing.
 
@@ -222,6 +223,7 @@ Settings are split in two, by one rule: anything that is the same for everyone l
   "base_folder": "data",
   "adult_age_cutoff": 18,
   "max_files_per_run": 200,
+  "sweep_lock_stale_minutes": 15,
   "adult_template_path": "templates/adult_report_template.docx",
   "child_template_path": "templates/child_report_template.docx",
   "generated_docs_folder": "reports",
@@ -238,6 +240,7 @@ Settings:
 - `base_folder`: local working folder for downloaded PDFs, local schedules, and processed PDFs.
 - `adult_age_cutoff`: age used to choose the adult or child report template.
 - `max_files_per_run`: maximum number of PDFs to process in one scheduler run.
+- `sweep_lock_stale_minutes`: how old, in minutes, a sweep's lock must be before the next live sweep assumes its owner died and takes it over. 15 if missing. Must be a positive number, or 15 is used and a warning is logged. See [Running the sweep](#running-the-sweep).
 - `adult_template_path`: path to the adult DOCX template.
 - `child_template_path`: path to the child DOCX template.
 - `generated_docs_folder`: local folder for filled report documents.
@@ -357,6 +360,8 @@ Two rules. Never add `--pause`, which makes the run wait for a key nobody will p
 Before scheduling it:
  
 - **Read its log, not the console.** A scheduled run prints nowhere anyone sees. Its report goes to `logs/sweep.log`, and a failure also goes to `logs/sweep_error.log` and makes the task's Last Run Result non-zero. Check there after the first scheduled runs.
+- **A skipped run looks like a success.** If a run finds the lock held it exits successfully, so Task Scheduler's Last Run Result stays green. Look for `Sweep skipped (live)` in `logs/sweep.log` to see how often that happens. A skip on every run means a lock is stuck, or a run takes longer than the interval.
+- **The lock doesn't replace Task Scheduler's own setting** for a task that is still running when it is due again, on the task's Settings tab. Check it. The lock covers what that setting can't: a run started by hand during a scheduled one, and two separate tasks.
 - **Run it by hand first,** as a preview and then with `--live`, against the sheet it will run on.
 - **It is safe to repeat.** A rerun on an unchanged sheet writes nothing, so the interval can be short. How often OA's comments should be picked up is still to be decided.
  
@@ -419,6 +424,8 @@ Each run logs when it started and in which mode (`live` or `preview`), the whole
 ```
  
 A run with any flagged case is logged at WARNING and says how many, so those runs stand out. A failure is logged with its traceback, the alert email is sent if emails are enabled, and the command exits with an error, so Task Scheduler's Last Run Result shows it. If `config/settings.json` can't be read, the sweep logs a warning and uses a `logs/` folder in the folder it was started in.
+
+A run that finds another live sweep running logs a single WARNING, `Sweep skipped (live): another sweep is running (...)`, with no start, report, or finish. A run that takes over a stale lock logs a WARNING, `Took over a stale sweep lock (...)`, before it starts.
  
 The report has Case IDs, staff names, and test codes, and no claimant names. The screenshot matcher does not log. It prints its output, which includes patient names, to the console only. That is listed under Known gaps.
 
@@ -558,6 +565,20 @@ Running it again and again is safe. A value that wouldn't change isn't rewritten
 - If the Ongoing tab has no `Services Requested` column, test changes can't be applied, and the report says so once.
 - If a case's saved original tests belong to a different case (for example after a row was cut and pasted), that case's tests are left alone and flagged. Its other updates still apply.
 - If a case's original tests need saving first and the save fails, its cell is left alone and flagged. The original is always saved before the cell is written, so a changed cell never exists without it.
+
+**Two sweeps at once**
+ 
+A live sweep takes a lock, the file `sweep.lock` in the folder it was started from, and gives it back when it finishes, even if it fails. A second live sweep that finds the lock held does nothing: it prints and logs one warning that names the holder, and exits **successfully**, since an overlap isn't an error.
+ 
+```text
+Another live sweep is already running (held by process 4321 (live) since 2026-11-02T10:00:05, 2.0 minutes old), so this run did nothing.
+```
+ 
+- **Previews take no lock** and are never blocked, because they write nothing.
+- **A lock that is too old is taken over.** A run killed without a chance to clean up, by a power cut, a closed window, or `taskkill`, leaves its lock behind. So a lock older than `sweep_lock_stale_minutes` (15 by default, in `config/settings.json`) is assumed to belong to a dead run, and the next live sweep takes it over and logs a warning. The age is that of the file, not what is written in it.
+- **The limit should be well above a normal run.** A run takes seconds. If runs ever get close to the limit, raise it. If it is too low, a slow but healthy run can be taken over. If it is too high, a crash blocks the sweep until the limit passes.
+- **A lock that can't be created** (for example in a read-only folder) is a failure, not a skip. It is logged, the alert is sent, and the run exits with an error, because a missing lock would leave overlaps unprotected.
+
 **The report**
  
 ```text
@@ -840,7 +861,7 @@ Add: wms
 5. Run `--live` again. It should write nothing and say `Tests: already up to date, no change`.
 6. Make a deliberate typo in the comment, such as `Provder:`, and run the sweep again. The Comments cell should turn orange with a note that suggests the right spelling.
  
-For the full set of checks after a change to the sweep, including rewritten and cleared comments, rows that move, and cases that can't be updated, follow [docs/manual_check_apply_test_changes.md](docs/manual_check_apply_test_changes.md).
+For the full set of checks after a change to the sweep, including rewritten and cleared comments, rows that move, cases that can't be updated, and two sweeps running at once, follow [docs/manual_check_apply_test_changes.md](docs/manual_check_apply_test_changes.md).
 
 ## Troubleshooting
 
@@ -957,6 +978,18 @@ The sweep was started somewhere other than the project root, so it couldn't find
  
 A case that stays flagged is logged in full, with the whole report, on every run until someone fixes it. The note on its Comments cell says how. See Known gaps.
 
+**`Another live sweep is already running`**
+ 
+A live sweep holds `sweep.lock`, in the folder the command was started from, and the message says which process, since when, and how old the lock is. If that run is still going, wait: this run did nothing, which is correct. If nothing is running, the run that held it was killed. The lock heals itself: once it is older than 15 minutes (`sweep_lock_stale_minutes`), the next live run takes it over. To use the sweep sooner, delete `sweep.lock`. The DOCX pipeline has its own, separate `scheduler.lock`, which never expires.
+ 
+**`Took over a stale sweep lock` in `sweep.log`**
+ 
+An earlier live run never gave its lock back, because it was killed (a power cut, a closed window, `taskkill`) or ran longer than the limit. An occasional one is fine. If it keeps happening, look at the `Sweep finished` lines before it. Runs that take close to the limit mean `sweep_lock_stale_minutes` is too low for the sheet.
+ 
+**A scheduled sweep succeeds but nothing seems to happen**
+ 
+A run that finds the lock held exits successfully by design, so Task Scheduler shows no failure. Look for `Sweep skipped (live)` in `logs/sweep.log`. Skips on every run mean a lock is stuck, or a run takes longer than the interval.
+
 ## Security
 
 This repository is public. Treat everything committed to it as visible to anyone, permanently.
@@ -991,12 +1024,16 @@ Use your own Dropbox app and your own copy of the sheet while developing. Produc
 - Test editions change over time, and a mismatch is the first thing to check when a test isn't recognized. Trinity Tree gives the current edition of a test even when a referral lists an older one, so a PDF can show an older code than the test actually given. How newer editions should appear in the Services tab is still being decided.
 - The sheet layout is a draft. Check [Tabs and columns](#tabs-and-columns) before renaming a header.
 - A new command that logs should give `setup_logging` its own file names, as the sweep does. Two processes must not write to one rotating file.
+- `app/run_lock.py` is a general lock with a stale limit, and the sweep is its first user. The DOCX pipeline's `scheduler.lock` could use it instead (see Known gaps), but `main.py` is shared, so propose that on its own.
 
 **Known gaps**
  
 - The DOCX pipeline and the sheet are not connected. Cases are added to the sheet by hand.
 - The screenshot matcher prints its output to the console only, so a scheduled run of it would leave no record. Its output includes patient names, so what to log, and where, needs a decision.
-- Nothing stops two sweeps running at once. A sweep that takes longer than its interval could overlap the next one, and the two would write to the same log file and the same sheet. A lock file, like the DOCX pipeline's, would prevent it.
+- The sweep's lock covers two live sweeps only. It doesn't stop the screenshot matcher, or someone inserting, deleting, or sorting rows, while a sweep is running. A sweep reads the sheet once and then writes by row number, so a row shifted during the few seconds of a run can make it write to the wrong row.
+- The lock is a file in the folder the command is started from, so two sweeps started from different folders don't see each other. A scheduled task should set "Start in" to the project root.
+- Two runs that find the same stale lock at the same instant could both take it over. That needs a crash and two starts within a few milliseconds, and it can only cause the overlap the lock exists to prevent.
+- The DOCX pipeline's `scheduler.lock` has no age limit. If a run is killed, every later run exits quietly until someone deletes the file. `app/run_lock.py` could replace it.
 - A case that stays flagged is logged in full, with the whole report, on every run. At short intervals the log grows quickly (about 1 KB a run for two flagged cases). Logging the full report only when it changes would fix it.
 - A flagged comment that is deleted entirely, when nothing has been applied to the case, keeps its orange fill and note.
 - A PDF whose case ID can't be read is written to the sheet as a row with a blank Case ID.
