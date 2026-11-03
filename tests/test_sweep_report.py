@@ -1,19 +1,13 @@
-"""
-Tests for app/sweep_report.py: the plain-text report printed after a
-sweep. Most tests build a SweepReport by hand so each wording rule is
-checked on its own. One runs a whole sweep on the in-memory fakes and
-formats the result.
-
-Run from the project root:
-    python -m pytest tests/test_sweep_report.py -v
-"""
+"""Scratch copy: the report tests you pasted, verbatim."""
 
 import pytest
 
 from app.apply_comment_updates import ONGOING_TAB, SweepReport, run_sweep
 from app.comment_parser import ParsedComment, ServiceChange
+from app.services_cell import ServiceLine
 from app.services_tab import SERVICES_TAB, ServicesTab
-from app.sweep_report import format_report
+from app.services_update import ServicesUpdate
+from app.sweep_report import APPLY_COMMAND, format_report, summary_counts, summary_line
 from tests.fakes import FakeSpreadsheet, FakeWorksheet
 
 
@@ -34,14 +28,8 @@ WISC = "96101-WISC-V"
 WAIS = "96101-WAIS-IV"
 
 
-# --- Nothing to report ----------------------------------------------
-
-
 def test_no_comments_says_so():
     assert format_report(report()) == "No rows had a comment to process."
-
-
-# --- Fields ---------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -62,9 +50,6 @@ def test_comment_without_names_or_problems_says_so():
     assert "No Provider/Psychometrist in comment" in text
 
 
-# --- Flagged comments -----------------------------------------------
-
-
 def test_flagged_comment_lists_each_problem_on_its_own_line():
     text = format_report(report([
         result("111", unrecognized_lines=["Add: wisk  (skipped: x)", "Notes: hi  (skipped: y)"]),
@@ -77,9 +62,6 @@ def test_flagged_comment_does_not_also_claim_there_were_no_names():
     assert "No Provider/Psychometrist" not in text
 
 
-# --- Test changes ---------------------------------------------------
-
-
 def test_test_changes_are_listed_in_plain_words_and_marked_not_applied():
     text = format_report(report([
         result("111", service_changes=[
@@ -90,9 +72,6 @@ def test_test_changes_are_listed_in_plain_words_and_marked_not_applied():
     assert "Test changes found (not applied to the sheet yet):" in text
     assert f"    add {CARS}" in text
     assert f"    change {WISC} to {WAIS}" in text
-
-
-# --- Summary --------------------------------------------------------
 
 
 def test_summary_counts_comments_updates_flags_and_test_changes():
@@ -112,9 +91,6 @@ def test_summary_omits_flagged_list_and_test_change_count_when_there_are_none():
     text = format_report(report([result("111", fields={"Provider": ("updated", "", "X")})]))
     assert "Flagged cases" not in text
     assert "test change(s)" not in text
-
-
-# --- The Services tab section ---------------------------------------
 
 
 PROBLEM = "Row 5: 'Beery VMI' isn't a valid service code, so it was skipped"
@@ -157,9 +133,6 @@ def test_services_section_comes_before_the_cases():
     assert text.index("Services tab needs attention") < text.index("Case 111")
 
 
-# --- End to end -----------------------------------------------------
-
-
 def test_whole_sweep_formatted():
     ongoing = FakeWorksheet([
         ["Case ID", "Provider", "Psychometrist", "Comments"],
@@ -183,3 +156,437 @@ def test_whole_sweep_formatted():
     assert f"add {CARS}" in text
     assert "unknown test 'wisk', did you mean WISC?" in text
     assert "Flagged cases: 15419898" in text
+
+
+
+# --- Tests applied to the sheet -------------------------------------
+
+PSYCH = "90791"
+AUTISM = "96130-AUTISM"
+WPPSI = "96101-WPPSI-IV"
+ORIGINAL_LINES = [ServiceLine(WISC), ServiceLine(PSYCH), ServiceLine(AUTISM)]
+
+
+def line(code, marker="", changed_from=""):
+    return ServiceLine(code, marker=marker, changed_from=changed_from)
+
+
+def applied_result(case_id, status, before=(), after=(), original_to_store=None,
+                 flags=(), fields=None, **parsed):
+    """A result as the sweep builds it when it has a metadata client."""
+    update = ServicesUpdate(
+        status="update" if status == "updated" else "unchanged",
+        lines=list(after),
+        original_to_store=original_to_store,
+        flags=list(flags),
+    )
+    return {
+        "case_id": case_id,
+        "parsed": ParsedComment(**parsed),
+        "fields": fields or {},
+        "flags": list(flags),
+        "services": {"status": status, "update": update, "detail": "", "before": list(before)},
+    }
+
+
+def outcome_only(case_id, status, **parsed):
+    """A result whose tests were never looked at (no update object)."""
+    return {
+        "case_id": case_id,
+        "parsed": ParsedComment(**parsed),
+        "fields": {},
+        "flags": [],
+        "services": {"status": status, "update": None, "detail": "", "before": None},
+    }
+
+
+def test_an_added_test_is_described_as_this_runs_change():
+    text = format_report(report([applied_result(
+        "111", "updated", ORIGINAL_LINES, ORIGINAL_LINES + [line(CARS, "added")],
+    )]))
+    assert "  Tests updated:\n    add 96130-CARS-2" in text
+    assert "not applied" not in text
+
+
+def test_a_swap_is_described_as_a_change_from_one_test_to_the_other():
+    after = [line(WAIS, "changed", WISC), line(PSYCH), line(AUTISM)]
+    text = format_report(report([applied_result("111", "updated", ORIGINAL_LINES, after)]))
+    assert f"    change {WISC} to {WAIS}" in text
+
+
+def test_a_swap_of_a_swap_is_described_against_the_cell_not_the_original():
+    before = [line(WAIS, "changed", WISC), line(PSYCH), line(AUTISM)]
+    after = [line(WPPSI, "changed", WISC), line(PSYCH), line(AUTISM)]
+    text = format_report(report([applied_result("111", "updated", before, after)]))
+    assert f"    change {WAIS} to {WPPSI}" in text
+    assert "restore" not in text and "remove" not in text
+
+
+def test_an_original_test_coming_back_is_a_restore():
+    before = [line(WISC), line(AUTISM)]
+    text = format_report(report([applied_result("111", "updated", before, ORIGINAL_LINES)]))
+    assert f"    restore {PSYCH}" in text
+
+
+def test_a_test_that_goes_is_a_removal():
+    before = ORIGINAL_LINES + [line(CARS, "added")]
+    text = format_report(report([applied_result("111", "updated", before, ORIGINAL_LINES)]))
+    assert f"    remove {CARS}" in text
+
+
+def test_an_add_and_a_swap_in_one_run_are_both_listed():
+    after = [line(WAIS, "changed", WISC), line(PSYCH), line(AUTISM), line(CARS, "added")]
+    text = format_report(report([applied_result("111", "updated", ORIGINAL_LINES, after)]))
+    assert f"change {WISC} to {WAIS}" in text and f"add {CARS}" in text
+
+
+def test_a_rewrite_that_changes_no_test_says_so():
+    after = [ServiceLine(WISC, "Wechsler"), line(PSYCH), line(AUTISM)]
+    text = format_report(report([applied_result("111", "updated", ORIGINAL_LINES, after)]))
+    assert "Tests: cell rewritten (wording, markers or layout), no tests changed" in text
+    assert "Tests updated:" not in text
+
+
+def test_a_preview_of_a_rewrite_that_changes_no_test_says_so():
+    after = [ServiceLine(WISC, "Wechsler"), line(PSYCH), line(AUTISM)]
+    text = format_report(dry_report([applied_result("111", "updated", ORIGINAL_LINES, after)]))
+    assert "Tests: cell would be rewritten (wording, markers or layout), no tests change" in text
+
+
+def test_a_case_that_is_already_up_to_date_says_so():
+    text = format_report(report([applied_result(
+        "111", "unchanged", ORIGINAL_LINES, ORIGINAL_LINES,
+        service_changes=[ServiceChange("add", WISC)],
+    )]))
+    assert "Tests: already up to date, no change" in text
+    assert "No Provider/Psychometrist" not in text
+
+
+def test_a_case_whose_changes_were_all_skipped_is_not_called_up_to_date():
+    text = format_report(report([applied_result(
+        "111", "unchanged", ORIGINAL_LINES, ORIGINAL_LINES,
+        flags=[f"Add: {AUTISM}  (skipped: {AUTISM} is already on this case)"],
+        service_changes=[ServiceChange("add", AUTISM)],
+    )]))
+    assert "already up to date" not in text
+    assert "NEEDS ATTENTION:" in text
+
+
+def test_a_case_with_no_test_changes_reads_as_before():
+    text = format_report(report([outcome_only("111", "none")]))
+    assert "No Provider/Psychometrist in comment" in text
+
+
+def test_without_a_metadata_client_the_changes_are_still_listed_as_not_applied():
+    text = format_report(report([outcome_only(
+        "111", "not_applied", service_changes=[ServiceChange("add", CARS)],
+    )]))
+    assert "Test changes found (not applied to the sheet yet):" in text
+    assert f"add {CARS}" in text
+    assert "1 test change(s) found, not applied to the sheet yet." in text
+
+
+def test_a_saved_original_is_mentioned():
+    text = format_report(report([applied_result(
+        "111", "updated", ORIGINAL_LINES, ORIGINAL_LINES + [line(CARS, "added")],
+        original_to_store=[WISC, PSYCH, AUTISM],
+    )]))
+    assert f"Original tests saved from the sheet: {WISC}, {PSYCH}, {AUTISM}" in text
+    assert "1 original list(s) saved." in text
+
+
+def test_an_original_that_could_not_be_saved_is_not_reported_as_saved():
+    result_ = applied_result("111", "store_failed", ORIGINAL_LINES, ORIGINAL_LINES,
+                           original_to_store=[WISC], flags=["Services Requested  (not changed: x)"])
+    text = format_report(report([result_]))
+    assert "saved" not in text
+    assert "NEEDS ATTENTION:" in text
+
+
+def test_refused_cases_show_their_flag_and_no_test_lines():
+    text = format_report(report([applied_result(
+        "111", "refused", flags=["Services Requested  (not changed: it has a line that can't be read)"],
+    )]))
+    assert "NEEDS ATTENTION:" in text
+    assert "Tests updated" not in text and "up to date" not in text
+
+
+def test_the_flag_list_uses_every_flag_not_just_the_parsers():
+    text = format_report(report([
+        applied_result("111", "unchanged", flags=["Change: x to y  (skipped: x isn't on this case)"]),
+        applied_result("222", "unchanged"),
+    ]))
+    assert "Flagged cases: 111" in text
+    assert "    Change: x to y  (skipped: x isn't on this case)" in text
+
+
+def test_the_missing_column_is_said_once_not_once_per_case():
+    text = format_report(report([
+        outcome_only("111", "no_column", service_changes=[ServiceChange("add", CARS)]),
+        outcome_only("222", "no_column", service_changes=[ServiceChange("add", CARS)]),
+    ]))
+    assert text.count("no 'Services Requested' column") == 1
+    assert text.index("no 'Services Requested' column") < text.index("Case 111")
+
+
+def test_summary_counts_cases_with_tests_updated():
+    after = ORIGINAL_LINES + [line(CARS, "added")]
+    text = format_report(report([
+        applied_result("111", "updated", ORIGINAL_LINES, after),
+        applied_result("222", "updated", ORIGINAL_LINES, after),
+        applied_result("333", "unchanged", ORIGINAL_LINES, ORIGINAL_LINES),
+    ]))
+    assert "2 case(s) had their tests updated." in text
+
+
+# --- Preview (dry run) ----------------------------------------------
+
+
+def dry_report(results=(), problems=(), flag="dry_run"):
+    return SweepReport(
+        results=list(results),
+        services=ServicesTab(problems=list(problems)),
+        services_flag=flag,
+        dry_run=True,
+    )
+
+
+def test_a_preview_says_nothing_was_written_before_anything_else():
+    text = format_report(dry_report([result("111")]))
+    assert text.startswith("DRY RUN: nothing was written to the sheet.")
+
+
+def test_a_live_report_has_no_banner_and_no_apply_command():
+    text = format_report(report([result("111")]))
+    assert "DRY RUN" not in text
+    assert APPLY_COMMAND not in text
+
+
+def test_a_preview_uses_the_conditional_for_fields():
+    text = format_report(dry_report([result("111", fields={
+        "Provider": ("updated", "Dr. Smith", "Dr. Doe"),
+        "Psychometrist": ("updated", "", "J. Smith"),
+    })]))
+    assert "Provider: would be updated from Dr. Smith to Dr. Doe" in text
+    assert "Psychometrist: would be set to J. Smith" in text
+
+
+def test_a_preview_uses_the_conditional_for_tests():
+    after = ORIGINAL_LINES + [line(CARS, "added")]
+    text = format_report(dry_report([applied_result(
+        "111", "updated", ORIGINAL_LINES, after, original_to_store=[WISC, PSYCH, AUTISM],
+    )]))
+    assert "Tests that would be updated:\n    add 96130-CARS-2" in text
+    assert "Original tests would be saved from the sheet:" in text
+
+
+def test_a_preview_summary_and_closing_line():
+    after = ORIGINAL_LINES + [line(CARS, "added")]
+    text = format_report(dry_report([
+        applied_result("111", "updated", ORIGINAL_LINES, after,
+                     original_to_store=[WISC], fields={"Provider": ("updated", "", "Dr. Doe")}),
+    ]))
+    assert "1 field(s) would be updated" in text
+    assert "1 case(s) would have their tests updated." in text
+    assert "1 original list(s) would be saved." in text
+    assert text.rstrip().endswith(f"To apply this for real, run: {APPLY_COMMAND}")
+
+
+def test_a_preview_says_it_did_not_note_the_services_tab():
+    text = format_report(dry_report(problems=[PROBLEM]))
+    assert "(dry run: not noted on the Services tab)" in text
+
+
+def test_a_preview_with_nothing_to_process_has_no_apply_command():
+    text = format_report(dry_report())
+    assert text.startswith("DRY RUN")
+    assert "No rows had a comment to process." in text
+    assert APPLY_COMMAND not in text
+
+
+# --- The summary reads one fact per line ---------------------------
+
+
+def summary_report(dry_run):
+    after = ORIGINAL_LINES + [line(CARS, "added")]
+    results = [
+        applied_result("111", "updated", ORIGINAL_LINES, after, original_to_store=[WISC],
+                       fields={"Provider": ("updated", "", "Dr. Doe")}),
+        applied_result("222", "unchanged", flags=["Add: x  (skipped: y)"]),
+        outcome_only("333", "not_applied", service_changes=[ServiceChange("add", CARS)]),
+    ]
+    flag = "dry_run" if dry_run else "unchanged"
+    return SweepReport(
+        results=results, services=ServicesTab(problems=[]), services_flag=flag, dry_run=dry_run
+    )
+
+
+def test_each_part_of_the_summary_is_on_its_own_line():
+    lines = format_report(summary_report(dry_run=False)).splitlines()
+    assert "3 comment(s) processed, 1 field(s) updated, 1 flagged for attention." in lines
+    assert "1 test change(s) found, not applied to the sheet yet." in lines
+    assert "1 case(s) had their tests updated." in lines
+    assert "1 original list(s) saved." in lines
+    assert "Flagged cases: 222" in lines
+
+
+def test_a_preview_summary_also_reads_one_fact_per_line():
+    lines = format_report(summary_report(dry_run=True)).splitlines()
+    assert "3 comment(s) processed, 1 field(s) would be updated, 1 flagged for attention." in lines
+    assert "1 case(s) would have their tests updated." in lines
+    assert "1 original list(s) would be saved." in lines
+    assert f"To apply this for real, run: {APPLY_COMMAND}" in lines
+
+
+def test_the_summary_lines_are_together_and_in_order():
+    lines = format_report(summary_report(dry_run=False)).splitlines()
+    start = next(i for i, text in enumerate(lines) if "comment(s) processed" in text)
+    assert lines[start + 1:start + 5] == [
+        "1 test change(s) found, not applied to the sheet yet.",
+        "1 case(s) had their tests updated.",
+        "1 original list(s) saved.",
+        "Flagged cases: 222",
+    ]
+
+
+# --- The counts behind the summary ----------------------------------
+
+
+def test_a_report_with_nothing_in_it_counts_nothing():
+    counts = summary_counts(report())
+    assert (counts.comments, counts.fields_updated, counts.changes_found) == (0, 0, 0)
+    assert (counts.tests_updated, counts.originals_saved, counts.flagged) == (0, 0, [])
+
+
+def test_the_counts_for_a_mixed_run():
+    counts = summary_counts(summary_report(dry_run=False))
+    assert counts.comments == 3
+    assert counts.fields_updated == 1
+    assert counts.changes_found == 1       # case 333 was never applied
+    assert counts.tests_updated == 1       # case 111
+    assert counts.originals_saved == 1     # case 111
+    assert counts.flagged == ["222"]
+
+
+def test_a_preview_counts_the_same_as_a_live_run():
+    live = summary_counts(summary_report(dry_run=False))
+    preview = summary_counts(summary_report(dry_run=True))
+    assert live == preview
+
+
+def test_only_a_case_whose_tests_were_updated_counts_as_updated():
+    results = [
+        applied_result("1", "unchanged"),
+        applied_result("2", "refused", flags=["x"]),
+        applied_result("3", "store_failed", original_to_store=[WISC], flags=["x"]),
+        outcome_only("4", "none"),
+        outcome_only("5", "unusable_original"),
+    ]
+    assert summary_counts(report(results)).tests_updated == 0
+
+
+def test_an_original_that_failed_to_save_is_not_counted_as_saved():
+    counts = summary_counts(report([
+        applied_result("111", "store_failed", original_to_store=[WISC], flags=["x"]),
+    ]))
+    assert counts.originals_saved == 0
+    assert counts.flagged == ["111"]
+
+
+def test_an_original_saved_while_every_change_was_skipped_still_counts():
+    counts = summary_counts(report([
+        applied_result("111", "unchanged", original_to_store=[WISC], flags=["skipped"]),
+    ]))
+    assert counts.originals_saved == 1
+    assert counts.tests_updated == 0
+    assert counts.flagged == ["111"]
+
+
+def test_test_changes_found_counts_only_those_never_applied():
+    counts = summary_counts(report([
+        outcome_only("1", "not_applied", service_changes=[ServiceChange("add", CARS)] * 2),
+        applied_result("2", "updated", ORIGINAL_LINES, ORIGINAL_LINES,
+                       service_changes=[ServiceChange("add", CARS)]),
+    ]))
+    assert counts.changes_found == 2
+
+
+def test_fields_already_set_are_not_counted_as_updates():
+    counts = summary_counts(report([
+        result("1", fields={"Provider": ("unchanged", "X", "X"), "Psychometrist": ("updated", "", "Y")}),
+    ]))
+    assert counts.fields_updated == 1
+
+
+def test_a_result_built_the_old_way_is_counted():
+    counts = summary_counts(report([
+        result("111", fields={"Provider": ("updated", "", "X")}, unrecognized_lines=["bad  (skipped: y)"]),
+    ]))
+    assert counts.fields_updated == 1
+    assert counts.flagged == ["111"]
+    assert counts.tests_updated == counts.originals_saved == 0
+
+
+def test_flagged_cases_keep_the_order_of_the_results():
+    counts = summary_counts(report([
+        applied_result("30", "unchanged", flags=["x"]),
+        applied_result("10", "unchanged"),
+        applied_result("20", "refused", flags=["x"]),
+    ]))
+    assert counts.flagged == ["30", "20"]
+
+
+def test_every_number_in_the_summary_comes_from_the_counts():
+    report_ = summary_report(dry_run=False)
+    counts = summary_counts(report_)
+    text = format_report(report_)
+    assert (
+        f"{counts.comments} comment(s) processed, "
+        f"{counts.fields_updated} field(s) updated, "
+        f"{len(counts.flagged)} flagged for attention."
+    ) in text
+    assert f"{counts.tests_updated} case(s) had their tests updated." in text
+    assert f"{counts.originals_saved} original list(s) saved." in text
+    assert f"{counts.changes_found} test change(s) found, not applied to the sheet yet." in text
+    assert "Flagged cases: " + ", ".join(counts.flagged) in text
+
+
+# --- The one-line summary for a log ---------------------------------
+
+
+def test_the_log_line_for_a_live_run():
+    line = summary_line(summary_report(dry_run=False), 2.5)
+    assert line == (
+        "Sweep finished (live): 3 comment(s), 1 field(s) updated, 1 flagged, "
+        "1 test change(s) found, not applied, 1 case(s) with tests updated, "
+        "1 original list(s) saved, 2.5s"
+    )
+
+
+def test_the_log_line_for_a_preview_says_would():
+    line = summary_line(summary_report(dry_run=True), 2.5)
+    assert line == (
+        "Sweep finished (preview): 3 comment(s), 1 field(s) would be updated, 1 flagged, "
+        "1 test change(s) found, not applied, 1 case(s) with tests that would be updated, "
+        "1 original list(s) that would be saved, 2.5s"
+    )
+
+
+def test_the_log_line_leaves_out_parts_that_are_zero():
+    assert summary_line(report(), 0.0) == (
+        "Sweep finished (live): 0 comment(s), 0 field(s) updated, 0 flagged, 0.0s"
+    )
+
+
+@pytest.mark.parametrize("seconds, shown", [(0.04, "0.0s"), (4.84, "4.8s"), (61.26, "61.3s")])
+def test_the_duration_is_shown_to_a_tenth_of_a_second(seconds, shown):
+    assert summary_line(report(), seconds).endswith(f", {shown}")
+
+
+def test_the_log_line_and_the_report_agree():
+    report_ = summary_report(dry_run=False)
+    counts = summary_counts(report_)
+    line = summary_line(report_, 1.0)
+    text = format_report(report_)
+    assert f"{counts.comments} comment(s), {counts.fields_updated} field(s) updated, {len(counts.flagged)} flagged" in line
+    assert f"{counts.comments} comment(s) processed, {counts.fields_updated} field(s) updated, {len(counts.flagged)} flagged for attention." in text

@@ -2,6 +2,7 @@
   "base_folder": "data",
   "adult_age_cutoff": 18,
   "max_files_per_run": 200,
+  "sweep_lock_stale_minutes": 15,
   "adult_template_path": "templates/adult_report_template.docx",
   "child_template_path": "templates/child_report_template.docx",
   "generated_docs_folder": "reports",

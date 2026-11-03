@@ -20,7 +20,25 @@ def get_logger():
     return logging.getLogger(LOGGER_NAME)
 
 
-def setup_logging(config=None):
+def setup_logging(
+    config=None,
+    info_log_name="scheduler.log",
+    error_log_name="scheduler_error.log",
+):
+    """
+    Sets up the shared logger with two rotating files in the log folder:
+    one for everything from INFO up, and one for errors only.
+
+    The file names default to the DOCX pipeline's. A command that runs
+    alongside it, such as the sweep, passes its own, so two processes never
+    write to the same rotating file. Rotating a file that another process has
+    open can fail on Windows, and the record being written is lost.
+
+    Calling it again returns the same logger without adding more file
+    handlers, so the first call decides which files are used. Only its own
+    file handlers count as "already set up". Other handlers on the logger,
+    such as one a test tool attaches, don't stop it from creating the files.
+    """
     config = config or {}
     health_config = config.get("health_check", {})
     log_folder = health_config.get("log_folder", "logs")
@@ -31,15 +49,15 @@ def setup_logging(config=None):
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
-    if logger.handlers:
+    if any(isinstance(handler, RotatingFileHandler) for handler in logger.handlers):
         return logger
 
     formatter = logging.Formatter(
         "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
     )
 
-    scheduler_log = os.path.join(log_folder, "scheduler.log")
-    error_log = os.path.join(log_folder, "scheduler_error.log")
+    scheduler_log = os.path.join(log_folder, info_log_name)
+    error_log = os.path.join(log_folder, error_log_name)
 
     info_handler = RotatingFileHandler(
         scheduler_log,
