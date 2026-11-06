@@ -74,8 +74,8 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 ├── config/
 │   └── settings.json             # Runtime folders and scheduler settings
 ├── docs/
-│   ├── manual_check_apply_test_changes.md  # Step-by-step checks to run after changing the sweep
-│   └── trinity_scheduler_process_guide.pdf
+│   ├── legacy_setup_notes.md               # Notes kept from the original project's setup guide
+│   └── manual_check_apply_test_changes.md  # Step-by-step checks to run after changing the sweep
 ├── scripts/
 │   ├── check_case_metadata.py    # Live check of the stored original lists, on a scratch tab
 │   ├── check_screenshot_to_finished.py # Runs the screenshot matcher (preview by default)
