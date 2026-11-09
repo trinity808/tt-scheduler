@@ -18,8 +18,9 @@ that keeps to 45 a minute, and a request refused for being over the limit is
 tried again after a pause. A full run takes a few minutes for that reason.
 
 STEPS SO FAR: set-up and clean-up, the stand-in spreadsheet, the scratch
-Services tab, scenario 1 (previewed, applied, applied again), and scenarios 2
-and 3, which edit the comment and sweep again.
+Services tab, scenario 1 (previewed, applied, applied again), scenarios 2 and 3,
+which edit the comment and sweep again, and scenarios 4, 5 and 10, which are
+about flags and refusals. They share one sweep, on a row each.
 
 Run from the project root:
     python -m scripts.check_sweep_live
@@ -85,10 +86,21 @@ TYPED = {
     "wppsi": "96101-WPPSI-IV", "psychiatric exam": "90791",
 }
 
-# One case per scenario: (scenario number, Case ID, the original tests, the comment).
+ORIGINAL_TESTS = ["96101-WISC-V", "90791", "96130-AUTISM"]
+
+# Scenarios 1 to 3 are a chain on one row: (scenario number, Case ID, the original
+# tests, the comment).
 CASES = [
-    (1, "S01", ["96101-WISC-V", "90791", "96130-AUTISM"],
-     "Provider: Dr. Doe\nPsychometrist: J. Smith\nAdd: wms"),
+    (1, "S01", ORIGINAL_TESTS, "Provider: Dr. Doe\nPsychometrist: J. Smith\nAdd: wms"),
+]
+
+# Scenarios that don't depend on each other, each on a row below the chain:
+# (scenario number, Case ID, the original tests, the comment, a line typed into
+# the cell by hand).
+BATCH = [
+    (4, "S04", ORIGINAL_TESTS, "Add: wisc\nChange: wppsi to wais\nAdd: wiat", ""),
+    (5, "S05", ORIGINAL_TESTS, "Provider: Dr. Doe\nAdd: wisk\nAdd: cars", ""),
+    (10, "S10", ORIGINAL_TESTS, "Provider: Dr. Doe\nPsychometrist: J. Smith\nAdd: cars", "add wms"),
 ]
 
 results = []
@@ -105,10 +117,15 @@ def check(label, ok, detail=""):
 # --- Keeping to Google's request limit ---------------------------------
 
 
+def say_on_screen(text):
+    """The sweep's output is captured while it runs, so a pause is shown on the real screen."""
+    print(text, file=sys.__stdout__)
+
+
 class Pacer:
     """Waits, when it has to, so that no more than `limit` requests go out in any `window` seconds."""
 
-    def __init__(self, limit=45, window=60.0, clock=time.monotonic, sleep=time.sleep, say=print):
+    def __init__(self, limit=45, window=60.0, clock=time.monotonic, sleep=time.sleep, say=say_on_screen):
         self.limit, self.window = limit, window
         self.clock, self.sleep, self.say = clock, sleep, say
         self.times = collections.deque()
@@ -133,7 +150,7 @@ def is_over_the_limit(error):
     return getattr(getattr(error, "response", None), "status_code", None) == 429
 
 
-def install_pacing(client, pacer, retries=3, pause=30.0, sleep=time.sleep, say=print):
+def install_pacing(client, pacer, retries=3, pause=30.0, sleep=time.sleep, say=say_on_screen):
     """
     Routes every request the gspread client makes through the pacer, and tries
     a request again, after a pause, if Google refuses it for being over the limit.
@@ -238,6 +255,32 @@ def look(ws, services_ws, client, row_number=2):
         "comments_note": ws.get_note(rowcol_to_a1(row_number, ONGOING_HEADERS.index("Comments") + 1)),
         "services_note": services_ws.get_note("A1"),
         "stored": stored_tests(client, row_number),
+    }
+
+
+def case_block(report, case_id):
+    """The part of a report about one case: from its 'Case <id>:' line to the next case's."""
+    block, inside = [], False
+    for line in report.splitlines():
+        if line.startswith("Case "):
+            inside = line.strip() == f"Case {case_id}:"
+        if inside:
+            block.append(line)
+    return "\n".join(block)
+
+
+def all_stored(client):
+    """Every stored original, as {row number: tests}."""
+    return {row: entry.tests for row, entry in read_all_case_tests(client).by_row.items()}
+
+
+def look_at_rows(ws, client, rows):
+    """The tab, the Comments note of each of `rows`, and every stored original."""
+    column = ONGOING_HEADERS.index("Comments") + 1
+    return {
+        "table": ws.get_all_values(),
+        "notes": {row: ws.get_note(rowcol_to_a1(row, column)) for row in rows},
+        "stored": all_stored(client),
     }
 
 
@@ -492,6 +535,141 @@ def run_checks(sh, ws, services_ws, work):
     check("applied again: Tests: already up to date, no change",
           "Tests: already up to date, no change" in report, report[:500])
     check("the sheet is unchanged by that run", state["table"] == after_chain)
+    check("the lock was given back", not os.path.exists(lock_path))
+
+    # --- Scenarios 4, 5 and 10: each on its own row, sharing a sweep -----
+    s01_row = row_of(after_chain, 2)
+    original_lines = [wisc_line, psych_line, autism_original_line]
+    first_row = 2 + len(CASES)
+    batch_rows = {bid: first_row + i for i, (_, bid, _, _, _) in enumerate(BATCH)}
+    cells = {}
+    rows = []
+    for _, bid, tests, bcomment, typed in BATCH:
+        cells[bid] = services_cell(tests) + (("\n" + typed) if typed else "")
+        rows.append([bid, "John Doe", "", "", cells[bid], "484.00", bcomment])
+    last_row = first_row + len(rows) - 1
+    ws.update(range_name=f"A{first_row}:{rowcol_to_a1(last_row, len(ONGOING_HEADERS))}", values=rows)
+    for _, bid, tests, _, _ in BATCH:
+        set_case_tests(client, batch_rows[bid], bid, tests)
+    r04, r05, r10 = batch_rows["S04"], batch_rows["S05"], batch_rows["S10"]
+    note_rows = list(batch_rows.values())
+
+    print("\n10. Scenarios 4, 5 and 10: set up on their own rows, then previewed")
+    set_up = look_at_rows(ws, client, [])
+    check("the batch rows read back with their comments and cells",
+          [(set_up["table"][batch_rows[b] - 1][4], set_up["table"][batch_rows[b] - 1][6])
+           for _, b, _, _, _ in BATCH] == [(cells[b], c) for _, b, _, c, _ in BATCH],
+          f"got {[set_up['table'][batch_rows[b] - 1][4:7:2] for _, b, _, _, _ in BATCH]}")
+    check("each batch case has its original stored",
+          all(set_up["stored"].get(batch_rows[b]) == t for _, b, t, _, _ in BATCH),
+          f"got {set_up['stored']}")
+    report = run_sweep_command(stand_in, [], work)
+    show(report)
+    previewed = look_at_rows(ws, client, [])
+    check("the report says it is a dry run", "DRY RUN" in report, report[:300])
+    check("the sheet is unchanged by the preview", previewed["table"] == set_up["table"])
+    check("the stored originals are unchanged by the preview", previewed["stored"] == set_up["stored"])
+
+    print("\n11. Scenarios 4, 5 and 10, applied")
+    report = apply_live(stand_in, work)
+    state = look_at_rows(ws, client, note_rows)
+    table = state["table"]
+
+    print("  -- scenario 4: changes that don't fit")
+    block = case_block(report, "S04")
+    wiat4 = f"4. 96101-WIAT-III - {NAMES['96101-WIAT-III']} (added)"
+    skipped_add = "Add: 96101-WISC-V  (skipped: 96101-WISC-V is already on this case)"
+    skipped_change = ("Change: 96101-WPPSI-IV to 96101-WAIS-IV  "
+                      "(skipped: 96101-WPPSI-IV isn't on this case)")
+    cell = row_of(table, r04)["Services Requested"]
+    note = state["notes"][r04]
+    check("S04: add 96101-WIAT-III", "add 96101-WIAT-III" in block, block[:300])
+    check("S04: the report has a NEEDS ATTENTION list", "NEEDS ATTENTION:" in report, report[:300])
+    check("S04: the Add of a test already there is skipped", skipped_add in report, report[:400])
+    check("S04: the Change of a test that isn't there is skipped", skipped_change in report, report[:400])
+    check("S04: the cell gains only WIAT-III, marked (added)",
+          test_lines(cell) == original_lines + [wiat4], f"got {test_lines(cell)}")
+    check("S04: the cell keeps a separator between tests",
+          cell == build_cell(separator, original_lines + [wiat4]), f"got {cell!r}")
+    check("S04: the Comments note lists both skipped lines",
+          skipped_add in note and skipped_change in note, f"note: {note!r}")
+
+    print("  -- scenario 5: an unknown test next to a good one")
+    block = case_block(report, "S05")
+    cars4 = f"4. 96130-CARS-2 - {NAMES['96130-CARS-2']} (added)"
+    row = row_of(table, r05)
+    cell = row["Services Requested"]
+    note = state["notes"][r05]
+    issue_lines = note.split("\n")[1:]
+    check("S05: Provider: set to Dr. Doe", "Provider: set to Dr. Doe" in block, block[:300])
+    check("S05: add 96130-CARS-2", "add 96130-CARS-2" in block, block[:300])
+    check("S05: wisk is flagged with a suggestion", "did you mean WISC?" in report, report[:400])
+    check("S05: CARS-2 is added, and nothing else changes",
+          test_lines(cell) == original_lines + [cars4], f"got {test_lines(cell)}")
+    check("S05: the cell keeps a separator between tests",
+          cell == build_cell(separator, original_lines + [cars4]), f"got {cell!r}")
+    check("S05: the Comments note has only the wisk line, with its suggestion",
+          len(issue_lines) == 1 and "wisk" in issue_lines[0].lower()
+          and "did you mean WISC?" in issue_lines[0], f"note: {note!r}")
+    check("S05: Provider reads Dr. Doe", row["Provider"] == "Dr. Doe", f"got {row['Provider']!r}")
+
+    print("  -- scenario 10: a line the system can't read")
+    block = case_block(report, "S10")
+    cant_read = "Services Requested  (not changed: the cell has a line that can't be read."
+    row = row_of(table, r10)
+    note = state["notes"][r10]
+    check("S10: Provider: set to Dr. Doe", "Provider: set to Dr. Doe" in block, block[:300])
+    check("S10: Psychometrist: set to J. Smith", "Psychometrist: set to J. Smith" in block, block[:300])
+    check("S10: the report says the cell has a line that can't be read",
+          cant_read in report, report[:500])
+    check("S10: the report quotes the line, add wms", "add wms" in report, report[:500])
+    check("S10: the cell is not changed", row["Services Requested"] == cells["S10"],
+          f"got {row['Services Requested']!r}")
+    check("S10: the Comments note says so, and quotes the line",
+          cant_read in note and "add wms" in note, f"note: {note!r}")
+    check("S10: Provider and Psychometrist read back",
+          (row["Provider"], row["Psychometrist"]) == ("Dr. Doe", "J. Smith"),
+          f"got {(row['Provider'], row['Psychometrist'])}")
+
+    check("the stored originals are unchanged", state["stored"] == previewed["stored"],
+          f"got {state['stored']}")
+    check("scenario 1's row is not touched by the batch", row_of(table, 2) == s01_row,
+          f"got {row_of(table, 2)}")
+    check("the lock was given back", not os.path.exists(lock_path))
+    round_one = state
+
+    print("\n12. Scenarios 4 and 10, corrected, and 5 left as it was")
+    edit_comment(ws, r04, "Add: wiat")        # the two bad lines are deleted
+    cell_address = rowcol_to_a1(r10, ONGOING_HEADERS.index("Services Requested") + 1)
+    ws.update(range_name=cell_address, values=[[services_cell(ORIGINAL_TESTS)]])  # the loose line is deleted
+    report = apply_live(stand_in, work)
+    state = look_at_rows(ws, client, note_rows)
+    table = state["table"]
+
+    print("  -- scenario 4")
+    check("S04: Tests: already up to date, no change",
+          "Tests: already up to date, no change" in case_block(report, "S04"),
+          case_block(report, "S04")[:300])
+    check("S04: the note clears", state["notes"][r04] == "", f"note: {state['notes'][r04]!r}")
+    check("S04: the cell is unchanged",
+          row_of(table, r04)["Services Requested"] == row_of(round_one["table"], r04)["Services Requested"])
+
+    print("  -- scenario 10")
+    cell = row_of(table, r10)["Services Requested"]
+    check("S10: add 96130-CARS-2", "add 96130-CARS-2" in case_block(report, "S10"),
+          case_block(report, "S10")[:300])
+    check("S10: CARS-2 is added", test_lines(cell) == original_lines + [cars4], f"got {test_lines(cell)}")
+    check("S10: the cell keeps a separator between tests",
+          cell == build_cell(separator, original_lines + [cars4]), f"got {cell!r}")
+    check("S10: the note clears", state["notes"][r10] == "", f"note: {state['notes'][r10]!r}")
+
+    print("  -- scenario 5 (its comment still has the unknown test)")
+    check("S05: its flag stays", state["notes"][r05] == round_one["notes"][r05],
+          f"note: {state['notes'][r05]!r}")
+    check("S05: its cell is unchanged",
+          row_of(table, r05)["Services Requested"] == row_of(round_one["table"], r05)["Services Requested"])
+
+    check("scenario 1's row is still not touched", row_of(table, 2) == s01_row)
     check("the lock was given back", not os.path.exists(lock_path))
 
 
