@@ -19,8 +19,9 @@ tried again after a pause. A full run takes a few minutes for that reason.
 
 STEPS SO FAR: set-up and clean-up, the stand-in spreadsheet, the scratch
 Services tab, scenario 1 (previewed, applied, applied again), scenarios 2 and 3,
-which edit the comment and sweep again, and scenarios 4, 5 and 10, which are
-about flags and refusals. They share one sweep, on a row each.
+which edit the comment and sweep again, scenarios 4, 5 and 10, which are about
+flags and refusals, and scenarios 11 to 14, where the stored original is missing
+or belongs to another row. Those share sweeps, on a row each.
 
 Run from the project root:
     python -m scripts.check_sweep_live
@@ -670,6 +671,140 @@ def run_checks(sh, ws, services_ws, work):
           row_of(table, r05)["Services Requested"] == row_of(round_one["table"], r05)["Services Requested"])
 
     check("scenario 1's row is still not touched", row_of(table, 2) == s01_row)
+    check("the lock was given back", not os.path.exists(lock_path))
+    round_two, after_batch_one = state, table
+
+    # --- Scenarios 11 to 14: the stored original is missing, or isn't this row's ---
+    changed_cell = build_cell(separator, original_lines + [wms_line])
+    clean_cell = services_cell(ORIGINAL_TESTS)
+    refused = "Services Requested  (not changed:"
+    second = [
+        # Case ID on the row, the original stored for it (a Case ID and tests), the cell, the comment
+        ("S11", None, changed_cell, "Add: wiat"),
+        ("S12", None, "", "Add: cars"),
+        ("S12-CONTROL", None, "", ""),
+        ("S13", None, clean_cell, "Psychometrist: J. Smith\nAdd: wiat"),
+        ("S14X", ("S14", ORIGINAL_TESTS), clean_cell, "Provider: Dr. Doe\nAdd: cars"),
+    ]
+    first_row2 = last_row + 1
+    rows2 = {cid: first_row2 + i for i, (cid, _, _, _) in enumerate(second)}
+    r11, r12, r12c, r13, r14 = (rows2[c] for c in ("S11", "S12", "S12-CONTROL", "S13", "S14X"))
+    last_row2 = first_row2 + len(second) - 1
+    ws.update(
+        range_name=f"A{first_row2}:{rowcol_to_a1(last_row2, len(ONGOING_HEADERS))}",
+        values=[[cid, "John Doe", "", "", cell_text, "484.00", c] for cid, _, cell_text, c in second],
+    )
+    for cid, stored_for, _, _ in second:
+        if stored_for:
+            set_case_tests(client, rows2[cid], stored_for[0], stored_for[1])
+
+    print("\n13. Scenarios 11 to 14: set up on their own rows, then previewed")
+    set_up = look_at_rows(ws, client, [])
+    check("the rows read back with their comments and cells",
+          [(set_up["table"][rows2[cid] - 1][4], set_up["table"][rows2[cid] - 1][6])
+           for cid, _, _, _ in second] == [(cell_text, c) for _, _, cell_text, c in second],
+          f"got {[set_up['table'][rows2[cid] - 1][4:7:2] for cid, _, _, _ in second]}")
+    check("only scenario 14 has an original stored, under the Case ID it had",
+          [r for r in set_up["stored"] if r >= first_row2] == [r14] and set_up["stored"][r14] == ORIGINAL_TESTS,
+          f"got {set_up['stored']}")
+    report = run_sweep_command(stand_in, [], work)
+    show(report)
+    previewed = look_at_rows(ws, client, [])
+    check("the report says it is a dry run", "DRY RUN" in report, report[:300])
+    check("the sheet is unchanged by the preview", previewed["table"] == set_up["table"])
+    check("the preview saved no original (scenario 13 is not adopted by a preview)",
+          previewed["stored"] == set_up["stored"], f"got {previewed['stored']}")
+
+    print("\n14. Scenarios 11 to 14, applied")
+    report = apply_live(stand_in, work)
+    state = look_at_rows(ws, client, [r11, r12, r14, r05])
+    table, stored = state["table"], state["stored"]
+
+    print("  -- scenario 11: nothing stored, and the cell already shows changes")
+    block, note = case_block(report, "S11"), state["notes"][r11]
+    check("S11: the cell is not changed", row_of(table, r11)["Services Requested"] == changed_cell,
+          f"got {row_of(table, r11)['Services Requested']!r}")
+    check("S11: nothing is stored for it", r11 not in stored, f"got {stored.get(r11)}")
+    check("S11: the report says it was not changed", refused in block, block[:400])
+    check("S11: the Comments note says so too", refused in note, f"note: {note!r}")
+    print(f"  (for reference, the note on S11 reads: {note!r})")
+
+    print("  -- scenario 12: nothing stored, and an empty cell")
+    block, note = case_block(report, "S12"), state["notes"][r12]
+    check("S12: the cell stays empty", row_of(table, r12)["Services Requested"] == "",
+          f"got {row_of(table, r12)['Services Requested']!r}")
+    check("S12: nothing is stored for it", r12 not in stored, f"got {stored.get(r12)}")
+    check("S12: the report says it was not changed", refused in block, block[:400])
+    check("S12: the Comments note says so too", refused in note, f"note: {note!r}")
+    check("S12 control: an empty comment and an empty cell is not in the report at all",
+          "S12-CONTROL" not in report, report[:400])
+    check("S12 control: its row is untouched", row_of(table, r12c) == row_of(set_up["table"], r12c))
+    print(f"  (for reference, the note on S12 reads: {note!r})")
+
+    print("  -- scenario 13: nothing stored, and a clean cell, so its tests are adopted")
+    block = case_block(report, "S13")
+    saved_line = next((l for l in block.splitlines() if "Original tests saved from the sheet:" in l), "")
+    row = row_of(table, r13)
+    cell = row["Services Requested"]
+    check("S13: it saves the cell's three tests as the original, without WIAT-III",
+          bool(saved_line) and all(code in saved_line for code in ORIGINAL_TESTS)
+          and "96101-WIAT-III" not in saved_line, block[:400])
+    check("S13: add 96101-WIAT-III", "add 96101-WIAT-III" in block, block[:400])
+    check("S13: Psychometrist: set to J. Smith", "Psychometrist: set to J. Smith" in block, block[:400])
+    check("S13: the stored original is the cell's tests, without WIAT-III",
+          stored.get(r13) == ORIGINAL_TESTS, f"got {stored.get(r13)}")
+    check("S13: the cell gains only WIAT-III, marked (added)",
+          test_lines(cell) == original_lines + [wiat4], f"got {test_lines(cell)}")
+    check("S13: the cell keeps a separator between tests",
+          cell == build_cell(separator, original_lines + [wiat4]), f"got {cell!r}")
+    check("S13: Psychometrist reads J. Smith", row["Psychometrist"] == "J. Smith",
+          f"got {row['Psychometrist']!r}")
+
+    print("  -- scenario 14: a stored original that doesn't match its row")
+    block, note = case_block(report, "S14X"), state["notes"][r14]
+    row = row_of(table, r14)
+    check("S14: Provider: set to Dr. Doe", "Provider: set to Dr. Doe" in block, block[:400])
+    check("S14: Provider reads Dr. Doe", row["Provider"] == "Dr. Doe", f"got {row['Provider']!r}")
+    check("S14: the cell is not changed", row["Services Requested"] == clean_cell,
+          f"got {row['Services Requested']!r}")
+    check("S14: the Comments note says it was not changed", refused in note, f"note: {note!r}")
+    check("S14: its stored original is untouched", stored.get(r14) == ORIGINAL_TESTS,
+          f"got {stored.get(r14)}")
+    print(f"  (for reference, the note on S14 reads: {note!r})")
+
+    check("the earlier rows are untouched by this batch", table[:last_row] == after_batch_one[:last_row])
+    check("scenario 5's flag is as it was", state["notes"][r05] == round_two["notes"][r05],
+          f"note: {state['notes'][r05]!r}")
+    check("the lock was given back", not os.path.exists(lock_path))
+    round_three = state
+
+    print("\n15. Scenario 14 corrected, scenario 13 applied again, 11 and 12 left as they were")
+    ws.update(range_name=rowcol_to_a1(r14, 1), values=[["S14"]])     # the Case ID is put back
+    report = apply_live(stand_in, work)
+    state = look_at_rows(ws, client, [r11, r12, r14])
+    table = state["table"]
+
+    print("  -- scenario 14")
+    cell = row_of(table, r14)["Services Requested"]
+    check("S14: add 96130-CARS-2", "add 96130-CARS-2" in case_block(report, "S14"),
+          case_block(report, "S14")[:400])
+    check("S14: CARS-2 is added", test_lines(cell) == original_lines + [cars4], f"got {test_lines(cell)}")
+    check("S14: the cell keeps a separator between tests",
+          cell == build_cell(separator, original_lines + [cars4]), f"got {cell!r}")
+    check("S14: the note clears", state["notes"][r14] == "", f"note: {state['notes'][r14]!r}")
+
+    print("  -- scenario 13")
+    check("S13: Tests: already up to date, no change",
+          "Tests: already up to date, no change" in case_block(report, "S13"),
+          case_block(report, "S13")[:400])
+    check("S13: the stored original is still the cell's original tests",
+          state["stored"].get(r13) == ORIGINAL_TESTS, f"got {state['stored'].get(r13)}")
+
+    print("  -- scenarios 11 and 12 (nothing was done about them)")
+    check("S11 and S12: their flags stay",
+          state["notes"][r11] == round_three["notes"][r11] and state["notes"][r12] == round_three["notes"][r12])
+    check("S11 and S12: their cells are unchanged",
+          [row_of(table, r)["Services Requested"] for r in (r11, r12)] == [changed_cell, ""])
     check("the lock was given back", not os.path.exists(lock_path))
 
 
