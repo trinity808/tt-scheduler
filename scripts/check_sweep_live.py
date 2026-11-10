@@ -20,8 +20,9 @@ tried again after a pause. A full run takes a few minutes for that reason.
 STEPS SO FAR: set-up and clean-up, the stand-in spreadsheet, the scratch
 Services tab, scenario 1 (previewed, applied, applied again), scenarios 2 and 3,
 which edit the comment and sweep again, scenarios 4, 5 and 10, which are about
-flags and refusals, and scenarios 11 to 14, where the stored original is missing
-or belongs to another row. Those share sweeps, on a row each.
+flags and refusals, scenarios 11 to 14, where the stored original is missing or
+belongs to another row, and scenarios 6 to 9, where a comment is rewritten or
+cleared or a line is typed into the cell. Each batch shares sweeps, on a row each.
 
 Run from the project root:
     python -m scripts.check_sweep_live
@@ -33,6 +34,7 @@ import functools
 import io
 import logging
 import os
+import re
 import sys
 import tempfile
 import time
@@ -206,6 +208,19 @@ def is_refused(stand_in, name):
     return False
 
 
+def make_ongoing_tab(sh, created, title):
+    """A new scratch Ongoing tab with its header row. It is deleted at the end with the others."""
+    ws = sh.add_worksheet(title=title, rows=20, cols=len(ONGOING_HEADERS))
+    created.append(ws)
+    ws.update(range_name=f"A1:{rowcol_to_a1(1, len(ONGOING_HEADERS))}", values=[ONGOING_HEADERS])
+    return ws
+
+
+def strip_number(line):
+    """'4. 96101-WIAT-III - text' -> '96101-WIAT-III - text'."""
+    return line.split(". ", 1)[1] if ". " in line else line
+
+
 def write_table(ws, rows):
     end = rowcol_to_a1(len(rows), max(len(row) for row in rows))
     ws.update(range_name=f"A1:{end}", values=rows)
@@ -331,7 +346,7 @@ def read_log(work_folder):
     return open(path, encoding="utf-8").read() if os.path.exists(path) else ""
 
 
-def run_checks(sh, ws, services_ws, work):
+def run_checks(sh, ws, services_ws, work, created):
     comments_cell = rowcol_to_a1(2, ONGOING_HEADERS.index("Comments") + 1)
     lock_path = os.path.join(work, "sweep.lock")
 
@@ -807,6 +822,170 @@ def run_checks(sh, ws, services_ws, work):
           [row_of(table, r)["Services Requested"] for r in (r11, r12)] == [changed_cell, ""])
     check("the lock was given back", not os.path.exists(lock_path))
 
+    # --- Scenarios 6 to 9: rewrites and hand edits, on a tab of their own ---
+    print("\n16. Scenarios 6 to 9: a tab of their own, set up, then the first state applied")
+    ws3 = make_ongoing_tab(sh, created, PREFIX + "Ongoing 3")
+    stand_in3 = ScratchSpreadsheet({ONGOING_TAB: ws3, SERVICES_TAB: services_ws})
+    client3 = SheetsMetadataClient(ws3)
+    plain = services_cell(ORIGINAL_TESTS)
+    hand_line = "4. 96130-CARS-2 - typed by hand"
+    third = [
+        # Case ID, the cell, the comment for the first sweep
+        ("S06A", plain, "Add: cars"),
+        ("S06B", plain, "Add: cars"),
+        ("S07", plain, "Change: wisc to wais"),
+        ("S08", plain, "Add: cars"),
+        ("S08-CONTROL", plain, ""),
+        ("S09", plain + "\n" + hand_line, "Provider: Dr. Doe"),
+    ]
+    rows3 = {cid: 2 + i for i, (cid, _, _) in enumerate(third)}
+    r6a, r6b, r7, r8, r8c, r9 = (rows3[c] for c in ("S06A", "S06B", "S07", "S08", "S08-CONTROL", "S09"))
+    ws3.update(
+        range_name=f"A2:{rowcol_to_a1(1 + len(third), len(ONGOING_HEADERS))}",
+        values=[[cid, "John Doe", "", "", cell_text, "484.00", c] for cid, cell_text, c in third],
+    )
+    for cid, _, _ in third:
+        set_case_tests(client3, rows3[cid], cid, ORIGINAL_TESTS)
+    started = look_at_rows(ws3, client3, [])
+    check("the rows read back with their comments and cells",
+          [(started["table"][rows3[c] - 1][4], started["table"][rows3[c] - 1][6]) for c, _, _ in third]
+          == [(cell_text, comment_text) for _, cell_text, comment_text in third],
+          f"got {[started['table'][rows3[c] - 1][4:7:2] for c, _, _ in third]}")
+
+    wais_swapped = f"1. 96101-WAIS-IV - {NAMES['96101-WAIS-IV']} (changed from 96101-WISC-V)"
+    cars5 = f"5. 96130-CARS-2 - {NAMES['96130-CARS-2']} (added)"
+
+    print("  -- round A: the first state of each is applied")
+    report = apply_live(stand_in3, work)
+    state = look_at_rows(ws3, client3, [])
+    table = state["table"]
+    cell_of = lambda cid: row_of(table, rows3[cid])["Services Requested"]
+    check("S06A, S06B and S08: CARS-2 is added",
+          all(test_lines(cell_of(c)) == original_lines + [cars4] for c in ("S06A", "S06B", "S08")),
+          f"got {[test_lines(cell_of(c)) for c in ('S06A', 'S06B', 'S08')]}")
+    check("S07: WISC-V is swapped for WAIS-IV, and nothing else changes",
+          test_lines(cell_of("S07")) == [wais_swapped, psych_line, autism_original_line],
+          f"got {test_lines(cell_of('S07'))}")
+    check("S09: Provider: set to Dr. Doe", "Provider: set to Dr. Doe" in case_block(report, "S09"),
+          case_block(report, "S09")[:300])
+    check("S09: Provider reads Dr. Doe", row_of(table, r9)["Provider"] == "Dr. Doe")
+    check("S09: the cell is not touched, since the comment has no test changes",
+          cell_of("S09") == plain + "\n" + hand_line, f"got {cell_of('S09')!r}")
+    check("the report is only about this batch's cases, since it has a tab of its own",
+          set(re.findall(r"^Case (\S+):", report, re.M)) <= set(rows3), report[:400])
+    check("the control (empty comment, plain cell) is not in the report at all",
+          "S08-CONTROL" not in report, report[:300])
+    check("the control row is untouched", row_of(table, r8c) == row_of(started["table"], r8c))
+    check("the lock was given back", not os.path.exists(lock_path))
+    round_a = state
+
+    print("\n17. Scenarios 6 to 9: rewritten, cleared, and added to")
+    comments_b = {"S06A": "Add: wiat", "S06B": "Add: wiat", "S07": "Add: cars",
+                  "S08": "", "S09": "Provider: Dr. Doe\nAdd: wiat"}
+    ws3.update(range_name=f"G2:G{1 + len(third)}",
+               values=[[comments_b.get(cid, c)] for cid, _, c in third])
+    report = apply_live(stand_in3, work)
+    state = look_at_rows(ws3, client3, [r6a, r6b, r7, r8, r9])
+    table, notes = state["table"], state["notes"]
+    cell_of = lambda cid: row_of(table, rows3[cid])["Services Requested"]
+    kept_earlier = ("Add: 96130-CARS-2  (kept: the cell has it from an earlier change, "
+                    "but this comment no longer includes it.")
+
+    print("  -- scenario 6: a comment rewritten from scratch")
+    expected = original_lines + [wiat4, cars5]
+    check("S06A: add 96101-WIAT-III", "add 96101-WIAT-III" in case_block(report, "S06A"),
+          case_block(report, "S06A")[:400])
+    check("S06A: the report says CARS-2 was kept", kept_earlier in case_block(report, "S06A"),
+          case_block(report, "S06A")[:400])
+    check("S06A: the cell has WIAT-III and then CARS-2, both marked (added)",
+          test_lines(cell_of("S06A")) == expected, f"got {test_lines(cell_of('S06A'))}")
+    check("S06A: the cell keeps a separator between tests",
+          cell_of("S06A") == build_cell(separator, expected), f"got {cell_of('S06A')!r}")
+    check("S06A: the Comments note lists the kept line", kept_earlier in notes[r6a], f"note: {notes[r6a]!r}")
+    check("S06B: the cell has WIAT-III and then CARS-2, both marked (added)",
+          test_lines(cell_of("S06B")) == expected, f"got {test_lines(cell_of('S06B'))}")
+    check("S06B: the Comments note lists the kept line", kept_earlier in notes[r6b], f"note: {notes[r6b]!r}")
+    print(f"  (for reference, the note on S06A reads: {notes[r6a]!r})")
+
+    print("  -- scenario 7: a swap the comment forgets")
+    check("S07: add 96130-CARS-2", "add 96130-CARS-2" in case_block(report, "S07"),
+          case_block(report, "S07")[:400])
+    check("S07: line 1 stays WAIS-IV, WISC-V does not come back, and CARS-2 is added",
+          test_lines(cell_of("S07")) == [wais_swapped, psych_line, autism_original_line, cars4],
+          f"got {test_lines(cell_of('S07'))}")
+    check("S07: the note says the Change was kept",
+          "Change: 96101-WISC-V to 96101-WAIS-IV  (kept:" in notes[r7], f"note: {notes[r7]!r}")
+    print(f"  (for reference, the note on S07 reads: {notes[r7]!r})")
+
+    print("  -- scenario 8: a comment cleared completely")
+    check("S08: the case is still in the report, with a kept line for CARS-2",
+          "Case S08:" in report and "Add: 96130-CARS-2  (kept:" in case_block(report, "S08"),
+          case_block(report, "S08")[:400])
+    check("S08: the Comments cell has a note, although it is empty",
+          "kept" in notes[r8] and "96130-CARS-2" in notes[r8], f"note: {notes[r8]!r}")
+    check("S08: the CARS-2 line is still in the cell",
+          test_lines(cell_of("S08")) == original_lines + [cars4], f"got {test_lines(cell_of('S08'))}")
+    check("S08 control: still not in the report", "S08-CONTROL" not in report, report[:300])
+
+    print("  -- scenario 9: a line typed into the cell by hand")
+    lines9 = test_lines(cell_of("S09"))
+    tail = lines9[3:]
+    check("S09: add 96101-WIAT-III", "add 96101-WIAT-III" in case_block(report, "S09"),
+          case_block(report, "S09")[:400])
+    check("S09: WIAT-III is added, and the hand-typed line stays in its own words, marked (added)",
+          lines9[:3] == original_lines
+          and sorted(strip_number(l) for l in tail)
+          == sorted([f"96101-WIAT-III - {NAMES['96101-WIAT-III']} (added)",
+                     "96130-CARS-2 - typed by hand (added)"])
+          and [l.split(". ", 1)[0] for l in tail] == ["4", "5"], f"got {lines9}")
+    check("S09: the note has a kept line for CARS-2 that doesn't say it came from an earlier change",
+          "Add: 96130-CARS-2  (kept:" in notes[r9] and "from an earlier change" not in notes[r9],
+          f"note: {notes[r9]!r}")
+    print(f"  (for reference, the note on S09 reads: {notes[r9]!r})")
+
+    check("the stored originals are unchanged", state["stored"] == round_a["stored"],
+          f"got {state['stored']}")
+    check("the lock was given back", not os.path.exists(lock_path))
+    round_b = state
+
+    print("\n18. Scenarios 6 to 8, resolved")
+    lines_6b = cell_of("S06B").split("\n")
+    deleted_by_hand = "\n".join(lines_6b[:-1])            # the CARS-2 line, but not the separator above it
+    ws3.update(range_name=f"G{r6a}", values=[["Add: wiat\nAdd: cars"]])
+    ws3.update(range_name=f"G{r7}", values=[["Add: cars\nChange: wisc to wais"]])
+    ws3.update(range_name=f"G{r8}", values=[["Add: cars"]])
+    ws3.update(range_name=f"E{r6b}", values=[[deleted_by_hand]])
+    report = apply_live(stand_in3, work)
+    state = look_at_rows(ws3, client3, [r6a, r6b, r7, r8, r9])
+    table, notes = state["table"], state["notes"]
+    cell_of = lambda cid: row_of(table, rows3[cid])["Services Requested"]
+    was = lambda cid: row_of(round_b["table"], rows3[cid])["Services Requested"]
+
+    print("  -- scenario 6: kept (the line is put back), or removed (deleted from the cell by hand)")
+    check("S06A: Tests: already up to date, no change",
+          "Tests: already up to date, no change" in case_block(report, "S06A"),
+          case_block(report, "S06A")[:400])
+    check("S06A: the note clears", notes[r6a] == "", f"note: {notes[r6a]!r}")
+    check("S06A: the cell is unchanged", cell_of("S06A") == was("S06A"))
+    check("S06B: the cell keeps just WIAT-III, with the leftover separator tidied",
+          cell_of("S06B") == build_cell(separator, original_lines + [wiat4]), f"got {cell_of('S06B')!r}")
+    check("S06B: Tests: cell rewritten (wording, markers or layout), no tests changed",
+          "Tests: cell rewritten (wording, markers or layout), no tests changed" in case_block(report, "S06B"),
+          case_block(report, "S06B")[:400])
+    check("S06B: the note clears", notes[r6b] == "", f"note: {notes[r6b]!r}")
+
+    print("  -- scenarios 7 and 8")
+    check("S07: the note clears", notes[r7] == "", f"note: {notes[r7]!r}")
+    check("S07: the cell is unchanged", cell_of("S07") == was("S07"))
+    check("S08: the note clears", notes[r8] == "", f"note: {notes[r8]!r}")
+    check("S08: the cell is unchanged", cell_of("S08") == was("S08"))
+    # Its line now carries a marker, so the sweep may describe it as "from an earlier
+    # change" and not as typed by hand. The flag must stay. Its wording may change.
+    check("S09: its flag stays, since its comment still leaves that line out",
+          "Add: 96130-CARS-2  (kept:" in notes[r9], f"note: {notes[r9]!r}")
+    print(f"  (for reference, the note on S09 now reads: {notes[r9]!r})")
+    check("the lock was given back", not os.path.exists(lock_path))
+
 
 def main():
     sh = get_client()
@@ -829,7 +1008,7 @@ def main():
         services_ws = sh.add_worksheet(title=SCRATCH_SERVICES, rows=30, cols=len(SERVICES_HEADERS))
         created.append(services_ws)
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as work:
-            run_checks(sh, ws, services_ws, work)
+            run_checks(sh, ws, services_ws, work, created)
     finally:
         for tab in created:
             sh.del_worksheet(tab)
