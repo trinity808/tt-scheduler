@@ -26,9 +26,16 @@ or a line is typed into the cell, and scenarios 15 and 16, where rows move and a
 case goes to Finished. Each batch shares sweeps, on a row each.
 
 Run from the project root:
-    python -m scripts.check_sweep_live
+    python -m scripts.check_sweep_live                 everything
+    python -m scripts.check_sweep_live --list          the groups of scenarios
+    python -m scripts.check_sweep_live --only 6,15     just these scenarios, with their groups
+    python -m scripts.check_sweep_live --only moves    just one group
+
+Each group of scenarios has a scratch tab of its own, so a group can be run
+alone. The scenarios inside a group share their sweeps, so they run together.
 """
 
+import argparse
 import collections
 import contextlib
 import functools
@@ -39,6 +46,7 @@ import re
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 
 import gspread
 from gspread.exceptions import APIError
@@ -54,7 +62,6 @@ from app.sheets_metadata_client import SheetsMetadataClient
 
 
 PREFIX = "SweepCheck "
-SCRATCH_ONGOING = PREFIX + "Ongoing"
 SCRATCH_SERVICES = PREFIX + "Services"
 
 ONGOING_HEADERS = [
@@ -215,9 +222,9 @@ def is_refused(stand_in, name):
     return False
 
 
-def make_tab(sh, created, title, headers):
+def make_tab(sh, created, title, headers, rows=20):
     """A new scratch tab with its header row. It is deleted at the end with the others."""
-    ws = sh.add_worksheet(title=title, rows=20, cols=len(headers))
+    ws = sh.add_worksheet(title=title, rows=rows, cols=len(headers))
     created.append(ws)
     ws.update(range_name=f"A1:{rowcol_to_a1(1, len(headers))}", values=[headers])
     return ws
@@ -380,28 +387,36 @@ def read_log(work_folder):
     return open(path, encoding="utf-8").read() if os.path.exists(path) else ""
 
 
-def run_checks(sh, ws, services_ws, work, created):
-    comments_cell = rowcol_to_a1(2, ONGOING_HEADERS.index("Comments") + 1)
-    lock_path = os.path.join(work, "sweep.lock")
 
-    print("1. Scratch tabs, and the cases written to them")
-    write_table(services_ws, [SERVICES_HEADERS] + SERVICES)
-    rows = [ONGOING_HEADERS]
-    for _, case_id, codes, comment in CASES:
-        rows.append([case_id, "John Doe", "", "", services_cell(codes), "484.00", comment])
-    write_table(ws, rows)
-    client = SheetsMetadataClient(ws)
-    for index, (_, case_id, codes, _) in enumerate(CASES, start=2):
-        set_case_tests(client, index, case_id, codes)
 
-    values = ws.get_all_values()
-    stored = [stored_tests(client, i) for i in range(2, 2 + len(CASES))]
-    check("the headers read back as written", values[:1] == [ONGOING_HEADERS], f"got {values[:1]}")
-    check("every case reads back with its comment",
-          [row[6] for row in values[1:]] == [c[3] for c in CASES], f"got {[row[6] for row in values[1:]]}")
-    check("every case has its original tests stored", stored == [c[2] for c in CASES], f"got {stored}")
+def build_env(sh, created, services_ws, work):
+    """What every group needs: the scratch spreadsheet, and the lines the cells are expected to hold."""
+    plain = services_cell(ORIGINAL_TESTS)
+    original_lines = test_lines(plain)
+    wisc_line, psych_line, autism_original_line = original_lines
+    return SimpleNamespace(
+        sh=sh, created=created, services_ws=services_ws, work=work,
+        lock_path=os.path.join(work, "sweep.lock"),
+        plain=plain, separator=plain.split("\n")[1], original_lines=original_lines,
+        wisc_line=wisc_line, psych_line=psych_line, autism_original_line=autism_original_line,
+        wms_line=f"4. 96101-WMS-IV - {NAMES['96101-WMS-IV']} (added)",
+        wiat4=f"4. 96101-WIAT-III - {NAMES['96101-WIAT-III']} (added)",
+        cars4=f"4. 96130-CARS-2 - {NAMES['96130-CARS-2']} (added)",
+        cars5=f"5. 96130-CARS-2 - {NAMES['96130-CARS-2']} (added)",
+        wais_swapped=f"1. 96101-WAIS-IV - {NAMES['96101-WAIS-IV']} (changed from 96101-WISC-V)",
+    )
 
-    print("\n2. The stand-in spreadsheet hands the sweep only scratch tabs")
+
+def check_setup(env):
+    """The stand-in spreadsheet, and the scratch Services tab read by the sweep's own code."""
+    sh, created, services_ws, work = env.sh, env.created, env.services_ws, env.work
+    lock_path, plain, separator = env.lock_path, env.plain, env.separator
+    original_lines = env.original_lines
+    wisc_line, psych_line, autism_original_line = env.wisc_line, env.psych_line, env.autism_original_line
+    wms_line, wiat4, cars4, cars5, wais_swapped = env.wms_line, env.wiat4, env.cars4, env.cars5, env.wais_swapped
+    ws = make_ongoing_tab(sh, created, PREFIX + "Setup")
+
+    print("\nThe stand-in spreadsheet hands the sweep only scratch tabs")
     stand_in = ScratchSpreadsheet({ONGOING_TAB: ws, SERVICES_TAB: services_ws})
     check("asking for 'Ongoing' gives the scratch tab",
           stand_in.worksheet(ONGOING_TAB).id == ws.id)
@@ -417,7 +432,7 @@ def run_checks(sh, ws, services_ws, work, created):
     for name in ("Finished", "Some Other Tab"):
         check(f"a tab it wasn't given ('{name}') is refused", is_refused(stand_in, name))
 
-    print("\n3. The scratch Services tab, read by the sweep's own code")
+    print("\nThe scratch Services tab, read by the sweep's own code")
     loaded = load_services_tab(stand_in)
     check("it loads, with no problems", loaded.lookup is not None and loaded.problems == [],
           f"problems: {loaded.problems}")
@@ -432,7 +447,36 @@ def run_checks(sh, ws, services_ws, work, created):
               loaded.lookup.description("96101-WMS-IV") == NAMES["96101-WMS-IV"],
               f"got {loaded.lookup.description('96101-WMS-IV')}")
 
-    print("\n4. Scenario 1, previewed: it must say what would change, and write nothing")
+
+def check_chain(env):
+    """Scenarios 1 to 3: one case, applied, and then its comment edited and swept again."""
+    sh, created, services_ws, work = env.sh, env.created, env.services_ws, env.work
+    lock_path, plain, separator = env.lock_path, env.plain, env.separator
+    original_lines = env.original_lines
+    wisc_line, psych_line, autism_original_line = env.wisc_line, env.psych_line, env.autism_original_line
+    wms_line, wiat4, cars4, cars5, wais_swapped = env.wms_line, env.wiat4, env.cars4, env.cars5, env.wais_swapped
+    ws = make_ongoing_tab(sh, created, PREFIX + "Ongoing")
+    stand_in = ScratchSpreadsheet({ONGOING_TAB: ws, SERVICES_TAB: services_ws})
+    client = SheetsMetadataClient(ws)
+    comments_cell = rowcol_to_a1(2, ONGOING_HEADERS.index("Comments") + 1)
+
+    print("Scratch tabs, and the cases written to them")
+    rows = [ONGOING_HEADERS]
+    for _, case_id, codes, comment in CASES:
+        rows.append([case_id, "John Doe", "", "", services_cell(codes), "484.00", comment])
+    write_table(ws, rows)
+    client = SheetsMetadataClient(ws)
+    for index, (_, case_id, codes, _) in enumerate(CASES, start=2):
+        set_case_tests(client, index, case_id, codes)
+
+    values = ws.get_all_values()
+    stored = [stored_tests(client, i) for i in range(2, 2 + len(CASES))]
+    check("the headers read back as written", values[:1] == [ONGOING_HEADERS], f"got {values[:1]}")
+    check("every case reads back with its comment",
+          [row[6] for row in values[1:]] == [c[3] for c in CASES], f"got {[row[6] for row in values[1:]]}")
+    check("every case has its original tests stored", stored == [c[2] for c in CASES], f"got {stored}")
+
+    print("\nScenario 1, previewed: it must say what would change, and write nothing")
     case_id, codes, comment = CASES[0][1], CASES[0][2], CASES[0][3]
     before = look(ws, services_ws, client)
     report = run_sweep_command(stand_in, [], work)
@@ -453,7 +497,7 @@ def run_checks(sh, ws, services_ws, work, created):
     check("the log has a preview start line", "Sweep started (preview)" in log, f"log: {log[:200]!r}")
     check("and a finish line", "Sweep finished" in log, f"log: {log[:200]!r}")
 
-    print("\n5. Scenario 1, applied for real")
+    print("\nScenario 1, applied for real")
     cell_before = state["row"]["Services Requested"].split("\n")
     report = apply_live(stand_in, work)
     shown = report[:400]
@@ -491,7 +535,7 @@ def run_checks(sh, ws, services_ws, work, created):
     check("and a finish line for it (the preview's was the first)",
           log.count("Sweep finished") == 2, f"log: {log[-300:]!r}")
 
-    print("\n6. Scenario 1, applied again: it must change nothing")
+    print("\nScenario 1, applied again: it must change nothing")
     after_first = state["table"]
     report = apply_live(stand_in, work)
     shown = report[:400]
@@ -517,7 +561,7 @@ def run_checks(sh, ws, services_ws, work, created):
     cars_line = f"5. 96130-CARS-2 - {NAMES['96130-CARS-2']} (added)"
     restored_line = f"3. 96130-AUTISM - {NAMES['96130-AUTISM']}"
 
-    print("\n7. Scenario 2, Tuesday: the provider is edited and a Change line is added")
+    print("\nScenario 2, Tuesday: the provider is edited and a Change line is added")
     comment = comment.replace("Dr. Doe", "Dr. Roe") + "\nChange: autism to wais"
     edit_comment(ws, 2, comment)
     report = apply_live(stand_in, work)
@@ -542,7 +586,7 @@ def run_checks(sh, ws, services_ws, work, created):
           f"got {state['stored']}")
     check("the lock was given back", not os.path.exists(lock_path))
 
-    print("\n8. Scenario 2, Wednesday: one more line, Add: cars")
+    print("\nScenario 2, Wednesday: one more line, Add: cars")
     comment += "\nAdd: cars"
     edit_comment(ws, 2, comment)
     report = apply_live(stand_in, work)
@@ -560,7 +604,7 @@ def run_checks(sh, ws, services_ws, work, created):
     check("the Comments cell has no note", state["comments_note"] == "")
     check("the lock was given back", not os.path.exists(lock_path))
 
-    print("\n9. Scenario 3: changing back, Change: wais to autism")
+    print("\nScenario 3: changing back, Change: wais to autism")
     comment += "\nChange: wais to autism"
     edit_comment(ws, 2, comment)
     report = apply_live(stand_in, work)
@@ -587,10 +631,21 @@ def run_checks(sh, ws, services_ws, work, created):
     check("the sheet is unchanged by that run", state["table"] == after_chain)
     check("the lock was given back", not os.path.exists(lock_path))
 
+
+def check_flags(env):
+    """Scenarios 4, 5 and 10: changes that don't fit, an unknown test, and a line that can't be read."""
+    sh, created, services_ws, work = env.sh, env.created, env.services_ws, env.work
+    lock_path, plain, separator = env.lock_path, env.plain, env.separator
+    original_lines = env.original_lines
+    wisc_line, psych_line, autism_original_line = env.wisc_line, env.psych_line, env.autism_original_line
+    wms_line, wiat4, cars4, cars5, wais_swapped = env.wms_line, env.wiat4, env.cars4, env.cars5, env.wais_swapped
+    ws = make_ongoing_tab(sh, created, PREFIX + "Ongoing 2")
+    stand_in = ScratchSpreadsheet({ONGOING_TAB: ws, SERVICES_TAB: services_ws})
+    client = SheetsMetadataClient(ws)
+
     # --- Scenarios 4, 5 and 10: each on its own row, sharing a sweep -----
-    s01_row = row_of(after_chain, 2)
     original_lines = [wisc_line, psych_line, autism_original_line]
-    first_row = 2 + len(CASES)
+    first_row = 2
     batch_rows = {bid: first_row + i for i, (_, bid, _, _, _) in enumerate(BATCH)}
     cells = {}
     rows = []
@@ -604,7 +659,7 @@ def run_checks(sh, ws, services_ws, work, created):
     r04, r05, r10 = batch_rows["S04"], batch_rows["S05"], batch_rows["S10"]
     note_rows = list(batch_rows.values())
 
-    print("\n10. Scenarios 4, 5 and 10: set up on their own rows, then previewed")
+    print("\nScenarios 4, 5 and 10: set up on their own rows, then previewed")
     set_up = look_at_rows(ws, client, [])
     check("the batch rows read back with their comments and cells",
           [(set_up["table"][batch_rows[b] - 1][4], set_up["table"][batch_rows[b] - 1][6])
@@ -620,7 +675,7 @@ def run_checks(sh, ws, services_ws, work, created):
     check("the sheet is unchanged by the preview", previewed["table"] == set_up["table"])
     check("the stored originals are unchanged by the preview", previewed["stored"] == set_up["stored"])
 
-    print("\n11. Scenarios 4, 5 and 10, applied")
+    print("\nScenarios 4, 5 and 10, applied")
     report = apply_live(stand_in, work)
     state = look_at_rows(ws, client, note_rows)
     table = state["table"]
@@ -683,12 +738,10 @@ def run_checks(sh, ws, services_ws, work, created):
 
     check("the stored originals are unchanged", state["stored"] == previewed["stored"],
           f"got {state['stored']}")
-    check("scenario 1's row is not touched by the batch", row_of(table, 2) == s01_row,
-          f"got {row_of(table, 2)}")
     check("the lock was given back", not os.path.exists(lock_path))
     round_one = state
 
-    print("\n12. Scenarios 4 and 10, corrected, and 5 left as it was")
+    print("\nScenarios 4 and 10, corrected, and 5 left as it was")
     edit_comment(ws, r04, "Add: wiat")        # the two bad lines are deleted
     cell_address = rowcol_to_a1(r10, ONGOING_HEADERS.index("Services Requested") + 1)
     ws.update(range_name=cell_address, values=[[services_cell(ORIGINAL_TESTS)]])  # the loose line is deleted
@@ -719,9 +772,19 @@ def run_checks(sh, ws, services_ws, work, created):
     check("S05: its cell is unchanged",
           row_of(table, r05)["Services Requested"] == row_of(round_one["table"], r05)["Services Requested"])
 
-    check("scenario 1's row is still not touched", row_of(table, 2) == s01_row)
     check("the lock was given back", not os.path.exists(lock_path))
-    round_two, after_batch_one = state, table
+
+
+def check_nothing_stored(env):
+    """Scenarios 11 to 14: the stored original is missing, or belongs to another row."""
+    sh, created, services_ws, work = env.sh, env.created, env.services_ws, env.work
+    lock_path, plain, separator = env.lock_path, env.plain, env.separator
+    original_lines = env.original_lines
+    wisc_line, psych_line, autism_original_line = env.wisc_line, env.psych_line, env.autism_original_line
+    wms_line, wiat4, cars4, cars5, wais_swapped = env.wms_line, env.wiat4, env.cars4, env.cars5, env.wais_swapped
+    ws = make_ongoing_tab(sh, created, PREFIX + "Ongoing 5")
+    stand_in = ScratchSpreadsheet({ONGOING_TAB: ws, SERVICES_TAB: services_ws})
+    client = SheetsMetadataClient(ws)
 
     # --- Scenarios 11 to 14: the stored original is missing, or isn't this row's ---
     changed_cell = build_cell(separator, original_lines + [wms_line])
@@ -735,7 +798,7 @@ def run_checks(sh, ws, services_ws, work, created):
         ("S13", None, clean_cell, "Psychometrist: J. Smith\nAdd: wiat"),
         ("S14X", ("S14", ORIGINAL_TESTS), clean_cell, "Provider: Dr. Doe\nAdd: cars"),
     ]
-    first_row2 = last_row + 1
+    first_row2 = 2
     rows2 = {cid: first_row2 + i for i, (cid, _, _, _) in enumerate(second)}
     r11, r12, r12c, r13, r14 = (rows2[c] for c in ("S11", "S12", "S12-CONTROL", "S13", "S14X"))
     last_row2 = first_row2 + len(second) - 1
@@ -747,7 +810,7 @@ def run_checks(sh, ws, services_ws, work, created):
         if stored_for:
             set_case_tests(client, rows2[cid], stored_for[0], stored_for[1])
 
-    print("\n13. Scenarios 11 to 14: set up on their own rows, then previewed")
+    print("\nScenarios 11 to 14: set up on their own rows, then previewed")
     set_up = look_at_rows(ws, client, [])
     check("the rows read back with their comments and cells",
           [(set_up["table"][rows2[cid] - 1][4], set_up["table"][rows2[cid] - 1][6])
@@ -764,9 +827,9 @@ def run_checks(sh, ws, services_ws, work, created):
     check("the preview saved no original (scenario 13 is not adopted by a preview)",
           previewed["stored"] == set_up["stored"], f"got {previewed['stored']}")
 
-    print("\n14. Scenarios 11 to 14, applied")
+    print("\nScenarios 11 to 14, applied")
     report = apply_live(stand_in, work)
-    state = look_at_rows(ws, client, [r11, r12, r14, r05])
+    state = look_at_rows(ws, client, [r11, r12, r14])
     table, stored = state["table"], state["stored"]
 
     print("  -- scenario 11: nothing stored, and the cell already shows changes")
@@ -829,13 +892,10 @@ def run_checks(sh, ws, services_ws, work, created):
           f"got {stored.get(r14)}")
     print(f"  (for reference, the note on S14 reads: {note!r})")
 
-    check("the earlier rows are untouched by this batch", table[:last_row] == after_batch_one[:last_row])
-    check("scenario 5's flag is as it was", state["notes"][r05] == round_two["notes"][r05],
-          f"note: {state['notes'][r05]!r}")
     check("the lock was given back", not os.path.exists(lock_path))
     round_three = state
 
-    print("\n15. Scenario 14 corrected, scenario 13 applied again, 11 and 12 left as they were")
+    print("\nScenario 14 corrected, scenario 13 applied again, 11 and 12 left as they were")
     ws.update(range_name=rowcol_to_a1(r14, 1), values=[["S14"]])     # the Case ID is put back
     report = apply_live(stand_in, work)
     state = look_at_rows(ws, client, [r11, r12, r14])
@@ -864,8 +924,17 @@ def run_checks(sh, ws, services_ws, work, created):
           [row_of(table, r)["Services Requested"] for r in (r11, r12)] == [changed_cell, ""])
     check("the lock was given back", not os.path.exists(lock_path))
 
+
+def check_rewrites(env):
+    """Scenarios 6 to 9: a comment rewritten or cleared, and a line typed into the cell by hand."""
+    sh, created, services_ws, work = env.sh, env.created, env.services_ws, env.work
+    lock_path, plain, separator = env.lock_path, env.plain, env.separator
+    original_lines = env.original_lines
+    wisc_line, psych_line, autism_original_line = env.wisc_line, env.psych_line, env.autism_original_line
+    wms_line, wiat4, cars4, cars5, wais_swapped = env.wms_line, env.wiat4, env.cars4, env.cars5, env.wais_swapped
+
     # --- Scenarios 6 to 9: rewrites and hand edits, on a tab of their own ---
-    print("\n16. Scenarios 6 to 9: a tab of their own, set up, then the first state applied")
+    print("\nScenarios 6 to 9: a tab of their own, set up, then the first state applied")
     ws3 = make_ongoing_tab(sh, created, PREFIX + "Ongoing 3")
     stand_in3 = ScratchSpreadsheet({ONGOING_TAB: ws3, SERVICES_TAB: services_ws})
     client3 = SheetsMetadataClient(ws3)
@@ -921,7 +990,7 @@ def run_checks(sh, ws, services_ws, work, created):
     check("the lock was given back", not os.path.exists(lock_path))
     round_a = state
 
-    print("\n17. Scenarios 6 to 9: rewritten, cleared, and added to")
+    print("\nScenarios 6 to 9: rewritten, cleared, and added to")
     comments_b = {"S06A": "Add: wiat", "S06B": "Add: wiat", "S07": "Add: cars",
                   "S08": "", "S09": "Provider: Dr. Doe\nAdd: wiat"}
     ws3.update(range_name=f"G2:G{1 + len(third)}",
@@ -996,7 +1065,7 @@ def run_checks(sh, ws, services_ws, work, created):
     check("the lock was given back", not os.path.exists(lock_path))
     round_b = state
 
-    print("\n18. Scenarios 6 to 8, resolved")
+    print("\nScenarios 6 to 8, resolved")
     lines_6b = cell_of("S06B").split("\n")
     deleted_by_hand = "\n".join(lines_6b[:-1])            # the CARS-2 line, but not the separator above it
     ws3.update(range_name=f"G{r6a}", values=[["Add: wiat\nAdd: cars"]])
@@ -1034,8 +1103,17 @@ def run_checks(sh, ws, services_ws, work, created):
     print(f"  (for reference, the note on S09 now reads: {notes[r9]!r})")
     check("the lock was given back", not os.path.exists(lock_path))
 
+
+def check_moves(env):
+    """Scenarios 15 and 16: rows that move, and a case moved to Finished."""
+    sh, created, services_ws, work = env.sh, env.created, env.services_ws, env.work
+    lock_path, plain, separator = env.lock_path, env.plain, env.separator
+    original_lines = env.original_lines
+    wisc_line, psych_line, autism_original_line = env.wisc_line, env.psych_line, env.autism_original_line
+    wms_line, wiat4, cars4, cars5, wais_swapped = env.wms_line, env.wiat4, env.cars4, env.cars5, env.wais_swapped
+
     # --- Scenarios 15 and 16: rows move, and a case goes to Finished, on a tab of their own ---
-    print("\n19. Scenarios 15 and 16: a tab of their own, three cases with changes applied")
+    print("\nScenarios 15 and 16: a tab of their own, three cases with changes applied")
     ws4 = make_ongoing_tab(sh, created, PREFIX + "Ongoing 4")
     finished_ws = make_tab(sh, created, PREFIX + "Finished", FINISHED_HEADERS)
     stand_in4 = ScratchSpreadsheet({ONGOING_TAB: ws4, SERVICES_TAB: services_ws})
@@ -1081,7 +1159,7 @@ def run_checks(sh, ws, services_ws, work, created):
               f"got {state['stored']}, cases at {where}")
         check(f"{label}: the lock was given back", not os.path.exists(lock_path))
 
-    print("\n20. Scenario 15: rows that move keep their originals")
+    print("\nScenario 15: rows that move keep their originals")
     ws4.insert_row([""] * len(ONGOING_HEADERS), index=2)          # a blank row above the first case
     report = apply_live(stand_in4, work)
     state = look_at_moved(ws4, client4)
@@ -1098,7 +1176,7 @@ def run_checks(sh, ws, services_ws, work, created):
           f"got {[state['table'][r - 1][0] for r in (2, 3, 4, 5)]}")
     moved_checks("after sorting by Case ID", report, state, ids)
 
-    print("\n21. Scenario 16: moving a case to Finished")
+    print("\nScenario 16: moving a case to Finished")
     date_completed = "11/10/2026 01:00 PM"
     move_case_to_finished(ws4, finished_ws, "S15B", extra_fields={"Date Completed": date_completed})
     report = apply_live(stand_in4, work)
@@ -1119,12 +1197,70 @@ def run_checks(sh, ws, services_ws, work, created):
     moved_checks("after the move", report, state, remaining)
 
 
-def main():
+# The scenarios share sweeps, so they run in groups: (name, the scenarios in it, its function).
+GROUPS = [
+    ("chain", (1, 2, 3), check_chain),
+    ("flags", (4, 5, 10), check_flags),
+    ("nothing-stored", (11, 12, 13, 14), check_nothing_stored),
+    ("rewrites", (6, 7, 8, 9), check_rewrites),
+    ("moves", (15, 16), check_moves),
+]
+
+
+def choose_groups(only):
+    """
+    The groups to run, in their usual order. `only` is a comma-separated list of
+    scenario numbers and group names, or None for all of them. Raises ValueError
+    for something that is neither.
+    """
+    if not only:
+        return list(GROUPS)
+    wanted = set()
+    for token in (t.strip() for t in only.split(",") if t.strip()):
+        matches = [g for g in GROUPS if token == g[0] or (token.isdigit() and int(token) in g[1])]
+        if not matches:
+            known = ", ".join(str(n) for n in sorted(n for g in GROUPS for n in g[1]))
+            raise ValueError(f"'{token}' is not a scenario number or a group name. "
+                             f"Scenarios: {known}. Groups: {', '.join(g[0] for g in GROUPS)}.")
+        wanted.update(g[0] for g in matches)
+    return [g for g in GROUPS if g[0] in wanted]
+
+
+def describe_groups():
+    lines = ["The scenarios share sweeps, so they run in groups:"]
+    for name, scenarios, _ in GROUPS:
+        lines.append(f"  {name:15} scenarios {', '.join(str(n) for n in scenarios)}")
+    lines.append("Use --only with scenario numbers or group names, for example: --only 6,15  or  --only moves")
+    return "\n".join(lines)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Live check of the sweep, on scratch tabs in the sandbox sheet.")
+    parser.add_argument("--only", help="run only these scenarios or groups, comma-separated (see --list)")
+    parser.add_argument("--list", action="store_true", help="show the groups and exit, without touching Google")
+    args = parser.parse_args([] if argv is None else argv)
+
+    if args.list:
+        print(describe_groups())
+        return 0
+    try:
+        chosen = choose_groups(args.only)
+    except ValueError as error:
+        print(error)
+        return 2
+
     sh = get_client()
     print(f"Sandbox spreadsheet: {sh.title}")
     print(f"This run creates tabs whose names start with '{PREFIX.strip()}' and deletes "
           "them at the end. It touches nothing else.")
-    print("It keeps to Google's request limit, so it takes a few minutes.\n")
+    print("It keeps to Google's request limit, so it takes a few minutes.")
+    print("Running: " + "; ".join(f"{name} (scenarios {', '.join(str(n) for n in nums)})"
+                                  for name, nums, _ in chosen) + "\n")
+    asked = {t.strip() for t in (args.only or "").split(",") if t.strip().isdigit()}
+    for name, nums, _ in chosen:
+        also = [str(n) for n in nums if str(n) not in asked]
+        if asked and also and any(str(n) in asked for n in nums):
+            print(f"  (the scenarios in '{name}' share their sweeps, so {', '.join(also)} run too)")
 
     client = getattr(sh, "client", None)
     if client is None or not hasattr(client, "request"):
@@ -1135,12 +1271,15 @@ def main():
     remove_leftovers(sh)
     created = []
     try:
-        ws = sh.add_worksheet(title=SCRATCH_ONGOING, rows=20, cols=len(ONGOING_HEADERS))
-        created.append(ws)
-        services_ws = sh.add_worksheet(title=SCRATCH_SERVICES, rows=30, cols=len(SERVICES_HEADERS))
-        created.append(services_ws)
+        services_ws = make_tab(sh, created, SCRATCH_SERVICES, SERVICES_HEADERS, rows=30)
+        write_table(services_ws, [SERVICES_HEADERS] + SERVICES)
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as work:
-            run_checks(sh, ws, services_ws, work, created)
+            env = build_env(sh, created, services_ws, work)
+            print("Setup: the stand-in spreadsheet and the scratch Services tab")
+            check_setup(env)
+            for name, nums, function in chosen:
+                print(f"\n=== {name}: scenarios {', '.join(str(n) for n in nums)} ===")
+                function(env)
     finally:
         for tab in created:
             sh.del_worksheet(tab)
@@ -1153,4 +1292,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
