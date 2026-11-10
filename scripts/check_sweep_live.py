@@ -21,8 +21,9 @@ STEPS SO FAR: set-up and clean-up, the stand-in spreadsheet, the scratch
 Services tab, scenario 1 (previewed, applied, applied again), scenarios 2 and 3,
 which edit the comment and sweep again, scenarios 4, 5 and 10, which are about
 flags and refusals, scenarios 11 to 14, where the stored original is missing or
-belongs to another row, and scenarios 6 to 9, where a comment is rewritten or
-cleared or a line is typed into the cell. Each batch shares sweeps, on a row each.
+belongs to another row, scenarios 6 to 9, where a comment is rewritten or cleared
+or a line is typed into the cell, and scenarios 15 and 16, where rows move and a
+case goes to Finished. Each batch shares sweeps, on a row each.
 
 Run from the project root:
     python -m scripts.check_sweep_live
@@ -47,6 +48,7 @@ from app.apply_comment_updates import ONGOING_TAB, main as sweep_main
 from app.case_metadata import read_all_case_tests, set_case_tests
 from app.services_cell import ServiceLine, render_services_cell
 from app.services_tab import SERVICES_TAB, load_services_tab
+from app.sheet_case_mover import move_case_to_finished
 from app.sheet_client import get_client
 from app.sheets_metadata_client import SheetsMetadataClient
 
@@ -58,6 +60,11 @@ SCRATCH_SERVICES = PREFIX + "Services"
 ONGOING_HEADERS = [
     "Case ID", "Patient Name", "Provider", "Psychometrist",
     "Services Requested", "Price", "Comments",
+]
+
+FINISHED_HEADERS = [
+    "Case ID", "Patient Name", "Provider", "Psychometrist", "Price",
+    "Payment Status", "Date Completed",
 ]
 
 # The scratch Services tab. Fixed, so that what the sweep resolves never
@@ -208,12 +215,16 @@ def is_refused(stand_in, name):
     return False
 
 
-def make_ongoing_tab(sh, created, title):
-    """A new scratch Ongoing tab with its header row. It is deleted at the end with the others."""
-    ws = sh.add_worksheet(title=title, rows=20, cols=len(ONGOING_HEADERS))
+def make_tab(sh, created, title, headers):
+    """A new scratch tab with its header row. It is deleted at the end with the others."""
+    ws = sh.add_worksheet(title=title, rows=20, cols=len(headers))
     created.append(ws)
-    ws.update(range_name=f"A1:{rowcol_to_a1(1, len(ONGOING_HEADERS))}", values=[ONGOING_HEADERS])
+    ws.update(range_name=f"A1:{rowcol_to_a1(1, len(headers))}", values=[headers])
     return ws
+
+
+def make_ongoing_tab(sh, created, title):
+    return make_tab(sh, created, title, ONGOING_HEADERS)
 
 
 def strip_number(line):
@@ -288,6 +299,29 @@ def case_block(report, case_id):
 def all_stored(client):
     """Every stored original, as {row number: tests}."""
     return {row: entry.tests for row, entry in read_all_case_tests(client).by_row.items()}
+
+
+def stored_with_ids(client):
+    """Every stored original, as {row number: (the Case ID it was stored under, its tests)}."""
+    return {row: (entry.case_id, entry.tests) for row, entry in read_all_case_tests(client).by_row.items()}
+
+
+def rows_by_id(table):
+    """{Case ID: row number} for every row of the tab that has a Case ID."""
+    return {row[0]: n for n, row in enumerate(table, start=1) if n > 1 and row and row[0].strip()}
+
+
+def look_at_moved(ws, client):
+    """The tab, the Comments note of every case on it, and every stored original with its Case ID."""
+    table = ws.get_all_values()
+    column = ONGOING_HEADERS.index("Comments") + 1
+    where = rows_by_id(table)
+    return {
+        "table": table,
+        "where": where,
+        "notes": {cid: ws.get_note(rowcol_to_a1(row, column)) for cid, row in where.items()},
+        "stored": stored_with_ids(client),
+    }
 
 
 def look_at_rows(ws, client, rows):
@@ -740,8 +774,11 @@ def run_checks(sh, ws, services_ws, work, created):
     check("S11: the cell is not changed", row_of(table, r11)["Services Requested"] == changed_cell,
           f"got {row_of(table, r11)['Services Requested']!r}")
     check("S11: nothing is stored for it", r11 not in stored, f"got {stored.get(r11)}")
-    check("S11: the report says it was not changed", refused in block, block[:400])
-    check("S11: the Comments note says so too", refused in note, f"note: {note!r}")
+    reason_11 = ("Services Requested  (not changed: this case's original tests weren't saved and "
+                 "the cell has already been changed, so it can't be updated safely)")
+    check("S11: the report gives the reason: nothing saved, and the cell already changed",
+          reason_11 in block, block[:400])
+    check("S11: the Comments note gives it too", reason_11 in note, f"note: {note!r}")
     print(f"  (for reference, the note on S11 reads: {note!r})")
 
     print("  -- scenario 12: nothing stored, and an empty cell")
@@ -749,8 +786,10 @@ def run_checks(sh, ws, services_ws, work, created):
     check("S12: the cell stays empty", row_of(table, r12)["Services Requested"] == "",
           f"got {row_of(table, r12)['Services Requested']!r}")
     check("S12: nothing is stored for it", r12 not in stored, f"got {stored.get(r12)}")
-    check("S12: the report says it was not changed", refused in block, block[:400])
-    check("S12: the Comments note says so too", refused in note, f"note: {note!r}")
+    reason_12 = ("Services Requested  (not changed: this case has no tests recorded, "
+                 "so changes can't be applied)")
+    check("S12: the report gives the reason: no tests recorded", reason_12 in block, block[:400])
+    check("S12: the Comments note gives it too", reason_12 in note, f"note: {note!r}")
     check("S12 control: an empty comment and an empty cell is not in the report at all",
           "S12-CONTROL" not in report, report[:400])
     check("S12 control: its row is untouched", row_of(table, r12c) == row_of(set_up["table"], r12c))
@@ -782,7 +821,10 @@ def run_checks(sh, ws, services_ws, work, created):
     check("S14: Provider reads Dr. Doe", row["Provider"] == "Dr. Doe", f"got {row['Provider']!r}")
     check("S14: the cell is not changed", row["Services Requested"] == clean_cell,
           f"got {row['Services Requested']!r}")
-    check("S14: the Comments note says it was not changed", refused in note, f"note: {note!r}")
+    reason_14 = (f"Services Requested  (not changed: Row {r14}: the stored test list is for "
+                 "case S14, not S14X, so it was ignored)")
+    check("S14: the Comments note gives the reason: the stored list is for another case",
+          reason_14 in note, f"note: {note!r}")
     check("S14: its stored original is untouched", stored.get(r14) == ORIGINAL_TESTS,
           f"got {stored.get(r14)}")
     print(f"  (for reference, the note on S14 reads: {note!r})")
@@ -890,6 +932,7 @@ def run_checks(sh, ws, services_ws, work, created):
     cell_of = lambda cid: row_of(table, rows3[cid])["Services Requested"]
     kept_earlier = ("Add: 96130-CARS-2  (kept: the cell has it from an earlier change, "
                     "but this comment no longer includes it.")
+    kept_advice = " Put the line back in the comment to keep it, or delete it from the cell to remove it)"
 
     print("  -- scenario 6: a comment rewritten from scratch")
     expected = original_lines + [wiat4, cars5]
@@ -901,10 +944,12 @@ def run_checks(sh, ws, services_ws, work, created):
           test_lines(cell_of("S06A")) == expected, f"got {test_lines(cell_of('S06A'))}")
     check("S06A: the cell keeps a separator between tests",
           cell_of("S06A") == build_cell(separator, expected), f"got {cell_of('S06A')!r}")
-    check("S06A: the Comments note lists the kept line", kept_earlier in notes[r6a], f"note: {notes[r6a]!r}")
+    check("S06A: the Comments note lists the kept line, with how to keep or remove it",
+          kept_earlier + kept_advice in notes[r6a], f"note: {notes[r6a]!r}")
     check("S06B: the cell has WIAT-III and then CARS-2, both marked (added)",
           test_lines(cell_of("S06B")) == expected, f"got {test_lines(cell_of('S06B'))}")
-    check("S06B: the Comments note lists the kept line", kept_earlier in notes[r6b], f"note: {notes[r6b]!r}")
+    check("S06B: the Comments note lists the kept line, with how to keep or remove it",
+          kept_earlier + kept_advice in notes[r6b], f"note: {notes[r6b]!r}")
     print(f"  (for reference, the note on S06A reads: {notes[r6a]!r})")
 
     print("  -- scenario 7: a swap the comment forgets")
@@ -913,8 +958,9 @@ def run_checks(sh, ws, services_ws, work, created):
     check("S07: line 1 stays WAIS-IV, WISC-V does not come back, and CARS-2 is added",
           test_lines(cell_of("S07")) == [wais_swapped, psych_line, autism_original_line, cars4],
           f"got {test_lines(cell_of('S07'))}")
-    check("S07: the note says the Change was kept",
-          "Change: 96101-WISC-V to 96101-WAIS-IV  (kept:" in notes[r7], f"note: {notes[r7]!r}")
+    check("S07: the note says the Change was kept, with how to keep or remove it",
+          "Change: 96101-WISC-V to 96101-WAIS-IV  (kept: the cell has it from an earlier change, "
+          "but this comment no longer includes it." + kept_advice in notes[r7], f"note: {notes[r7]!r}")
     print(f"  (for reference, the note on S07 reads: {notes[r7]!r})")
 
     print("  -- scenario 8: a comment cleared completely")
@@ -938,8 +984,10 @@ def run_checks(sh, ws, services_ws, work, created):
           == sorted([f"96101-WIAT-III - {NAMES['96101-WIAT-III']} (added)",
                      "96130-CARS-2 - typed by hand (added)"])
           and [l.split(". ", 1)[0] for l in tail] == ["4", "5"], f"got {lines9}")
-    check("S09: the note has a kept line for CARS-2 that doesn't say it came from an earlier change",
-          "Add: 96130-CARS-2  (kept:" in notes[r9] and "from an earlier change" not in notes[r9],
+    check("S09: the note has a kept line for CARS-2 that says it was typed by hand, not that it came from an earlier change",
+          "Add: 96130-CARS-2  (kept: the cell has this line, but it isn't in the PDF's list or this comment. "
+          "Add it to the comment to keep it as a change, or delete it from the cell to remove it)" in notes[r9]
+          and "from an earlier change" not in notes[r9],
           f"note: {notes[r9]!r}")
     print(f"  (for reference, the note on S09 reads: {notes[r9]!r})")
 
@@ -985,6 +1033,90 @@ def run_checks(sh, ws, services_ws, work, created):
           "Add: 96130-CARS-2  (kept:" in notes[r9], f"note: {notes[r9]!r}")
     print(f"  (for reference, the note on S09 now reads: {notes[r9]!r})")
     check("the lock was given back", not os.path.exists(lock_path))
+
+    # --- Scenarios 15 and 16: rows move, and a case goes to Finished, on a tab of their own ---
+    print("\n19. Scenarios 15 and 16: a tab of their own, three cases with changes applied")
+    ws4 = make_ongoing_tab(sh, created, PREFIX + "Ongoing 4")
+    finished_ws = make_tab(sh, created, PREFIX + "Finished", FINISHED_HEADERS)
+    stand_in4 = ScratchSpreadsheet({ONGOING_TAB: ws4, SERVICES_TAB: services_ws})
+    client4 = SheetsMetadataClient(ws4)
+    moving = [
+        # Case ID, the comment. Out of order, so that sorting by Case ID moves them.
+        ("S15B", "Add: cars"),
+        ("S15C", "Add: wiat"),
+        ("S15A", "Change: wisc to wais"),
+    ]
+    ids = [cid for cid, _ in moving]
+    expected_cell = {
+        "S15B": build_cell(separator, original_lines + [cars4]),
+        "S15C": build_cell(separator, original_lines + [wiat4]),
+        "S15A": build_cell(separator, [wais_swapped, psych_line, autism_original_line]),
+    }
+    ws4.update(range_name=f"A2:{rowcol_to_a1(1 + len(moving), len(ONGOING_HEADERS))}",
+               values=[[cid, "John Doe", "", "", plain, "484.00", c] for cid, c in moving])
+    for row, (cid, _) in enumerate(moving, start=2):
+        set_case_tests(client4, row, cid, ORIGINAL_TESTS)
+    report = apply_live(stand_in4, work)
+    state = look_at_moved(ws4, client4)
+    check("the report is only about these three cases",
+          set(re.findall(r"^Case (\S+):", report, re.M)) == set(ids), report[:400])
+    check("each case has its change applied",
+          all(row_of(state["table"], state["where"][c])["Services Requested"] == expected_cell[c] for c in ids),
+          f"got {[row_of(state['table'], state['where'][c])['Services Requested'] for c in ids]}")
+    check("the lock was given back", not os.path.exists(lock_path))
+
+    def moved_checks(label, report, state, remaining):
+        """After rows have moved: nothing changes, nothing is flagged, and every original is on its own row."""
+        where, table = state["where"], state["table"]
+        check(f"{label}: every case says its tests are already up to date",
+              all("Tests: already up to date, no change" in case_block(report, c) for c in remaining),
+              report[:500])
+        check(f"{label}: nothing is flagged", "NEEDS ATTENTION" not in report, report[:500])
+        check(f"{label}: no cell has changed",
+              all(row_of(table, where[c])["Services Requested"] == expected_cell[c] for c in remaining))
+        check(f"{label}: no Comments cell has a note",
+              all(state["notes"][c] == "" for c in remaining), f"notes: {state['notes']}")
+        check(f"{label}: each stored original is on the row of its own Case ID",
+              all(state["stored"].get(where[c]) == (c, ORIGINAL_TESTS) for c in remaining),
+              f"got {state['stored']}, cases at {where}")
+        check(f"{label}: the lock was given back", not os.path.exists(lock_path))
+
+    print("\n20. Scenario 15: rows that move keep their originals")
+    ws4.insert_row([""] * len(ONGOING_HEADERS), index=2)          # a blank row above the first case
+    report = apply_live(stand_in4, work)
+    state = look_at_moved(ws4, client4)
+    check("the cases moved down one row, in the same order",
+          state["where"] == {"S15B": 3, "S15C": 4, "S15A": 5}, f"got {state['where']}")
+    check("the blank row has no stored original", 2 not in state["stored"], f"got {state['stored']}")
+    moved_checks("after inserting a row", report, state, ids)
+
+    ws4.sort((1, "asc"), range=f"A3:G{2 + len(moving)}")           # the cases, by Case ID
+    report = apply_live(stand_in4, work)
+    state = look_at_moved(ws4, client4)
+    check("the cases are now in Case ID order, below the blank row",
+          [state["table"][r - 1][0] for r in (2, 3, 4, 5)] == ["", "S15A", "S15B", "S15C"],
+          f"got {[state['table'][r - 1][0] for r in (2, 3, 4, 5)]}")
+    moved_checks("after sorting by Case ID", report, state, ids)
+
+    print("\n21. Scenario 16: moving a case to Finished")
+    date_completed = "11/10/2026 01:00 PM"
+    move_case_to_finished(ws4, finished_ws, "S15B", extra_fields={"Date Completed": date_completed})
+    report = apply_live(stand_in4, work)
+    state = look_at_moved(ws4, client4)
+    finished_table = finished_ws.get_all_values()
+    remaining = ["S15A", "S15C"]
+    check("the Ongoing row is gone, and the rows below moved up",
+          [state["table"][r - 1][0] for r in (3, 4)] == remaining and "S15B" not in state["where"]
+          and len(rows_by_id(state["table"])) == 2, f"got {state['where']}")
+    check("the case is in Finished, with its Date Completed",
+          len(finished_table) > 1 and finished_table[1][0] == "S15B"
+          and finished_table[1][FINISHED_HEADERS.index("Date Completed")] == date_completed,
+          f"got {finished_table[1:]}")
+    check("its stored original went with its row",
+          all(cid != "S15B" for cid, _ in state["stored"].values()) and len(state["stored"]) == 2,
+          f"got {state['stored']}")
+    check("a sweep afterwards does not mention the case", "S15B" not in report, report[:400])
+    moved_checks("after the move", report, state, remaining)
 
 
 def main():
