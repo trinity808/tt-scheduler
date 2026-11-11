@@ -2,7 +2,5 @@ python-dotenv
 dropbox
 pdfplumber
 python-docx
-python-dateutil
-python-docx
 gspread
-tzdata
+tzdata  # timezone data for zoneinfo on Windows (America/Phoenix)

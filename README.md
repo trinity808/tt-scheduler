@@ -74,8 +74,8 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 ├── config/
 │   └── settings.json             # Runtime folders and scheduler settings
 ├── docs/
-│   ├── manual_check_apply_test_changes.md  # Step-by-step checks to run after changing the sweep
-│   └── trinity_scheduler_process_guide.pdf
+│   ├── legacy_setup_notes.md               # Notes kept from the original project's setup guide
+│   └── manual_check_apply_test_changes.md  # Step-by-step checks to run after changing the sweep
 ├── scripts/
 │   ├── check_case_metadata.py    # Live check of the stored original lists, on a scratch tab
 │   ├── check_screenshot_to_finished.py # Runs the screenshot matcher (preview by default)
@@ -663,6 +663,13 @@ python -m app.sheet_case_mover
 
 It asks for a Case ID, and optionally a Payment Status and a Date Completed. The case is written to the Finished tab, in the first row after the last case, and only then deleted from Ongoing. If the write fails, the case is still in Ongoing. Moving cases is manual for now.
 
+**If a move is interrupted.** The case is written to Finished before it is deleted from Ongoing, so a failure in between leaves it in both tabs. Running the same move again is safe. It finds the case already in Finished and adds no second row. It fills only the blank cells it has a value for, leaves everything else alone, logs a warning, and then deletes the case from Ongoing.
+ 
+It refuses, changing nothing and leaving the case in Ongoing, when the Finished row isn't a clean match for what it would write:
+ 
+- **A different value in a column it would write,** for example another Price or Date Completed. The error names the columns. If the Finished row is right, delete the case's row from Ongoing by hand. Otherwise fix the Finished row, then run the move again.
+- **The case is in Finished more than once,** for example from a move that was retried before this was fixed. The error names the rows. Remove the extras first.
+
 The case's stored original tests are deleted with its Ongoing row, since the case no longer needs them.
 
 ### Stored original tests
@@ -791,7 +798,7 @@ It is the screenshot's last-modified time on Dropbox, not the time the move ran,
 - It only handles 2026: a case scheduled in any other year is skipped, because the year is written into the code and `DROPBOX_YEAR_FOLDER` points at a single year's folder. Cases outlive their year (a December exam can be submitted in January), so both years' folders will need to be reachable at once. How to do that depends on what the app can see in production, and is still to be decided. Today the app is shared only the `2026` folder, because storage space limited what could be shared.
 - Skipped cases are reported only on the console. A case with a misspelled provider or folder name just stays in Ongoing.
 - Its name matching has no automated tests yet, so the preview is the check.
-- If a move fails after the case is written to Finished but before it is deleted from Ongoing, running it again can add the case to Finished a second time.
+- A move that finds the case already in Finished with different values, or in Finished more than once, refuses with an error and changes nothing. The matcher doesn't catch that error per case, so a refusal ends the whole run, and the cases after it are not moved until the Finished row is fixed. A clean retry after an interruption no longer adds a duplicate row.
 - Any image file in the claimant's folder counts as a submission, and its name isn't checked, because screenshot names vary by device. In practice the folder holds only the screenshot, so several images should be rare. If there are several, it picks the first by file path in alphabetical order, which is arbitrary, so Date Completed could come from any of them. Treating several images as ambiguous, as it does for several matching folders, is a possible change.
 
 ## Testing
@@ -990,6 +997,18 @@ An earlier live run never gave its lock back, because it was killed (a power cut
  
 A run that finds the lock held exits successfully by design, so Task Scheduler shows no failure. Look for `Sweep skipped (live)` in `logs/sweep.log`. Skips on every run mean a lock is stuck, or a run takes longer than the interval.
 
+**`Case ID ... is already in Finished (row N) with different values for: ...`**
+ 
+The case is in both tabs, and the Finished row doesn't match what the move would write. Nothing was changed. This usually means someone corrected the Finished row after an earlier move was interrupted, or the case was re-opened. If the Finished row is right, delete the case's row from Ongoing by hand. Otherwise fix the Finished row, then run the move again.
+ 
+**`Case ID ... appears N times in Finished`**
+ 
+The case has more than one row in Finished, probably from a move that was retried before this was fixed. Remove the extra rows, keeping the correct one, then run the move again.
+ 
+**`Case ID ... was already in Finished (row N), so no row was added`**
+ 
+This is a warning, not an error. An earlier move wrote the case to Finished and was interrupted before removing it from Ongoing. This run finished the job by removing it, and added no second row. If the message ends with `Filled in: ...`, those blank cells in the Finished row were filled from the Ongoing row.
+
 ## Security
 
 This repository is public. Treat everything committed to it as visible to anyone, permanently.
@@ -1037,7 +1056,6 @@ Use your own Dropbox app and your own copy of the sheet while developing. Produc
 - A case that stays flagged is logged in full, with the whole report, on every run. At short intervals the log grows quickly (about 1 KB a run for two flagged cases). Logging the full report only when it changes would fix it.
 - A flagged comment that is deleted entirely, when nothing has been applied to the case, keeps its orange fill and note.
 - A PDF whose case ID can't be read is written to the sheet as a row with a blank Case ID.
-- A move to Finished writes the case there before deleting it from Ongoing, so if it fails in between and is run again, the case can be added to Finished twice.
 - The screenshot matcher's own limits are listed in its section.
 
 ### Contributing
