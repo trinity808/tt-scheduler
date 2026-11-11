@@ -786,6 +786,7 @@ It skips a case and says why, instead of guessing, when:
 - the claimant's folder has no image file anywhere inside it (`.png`, `.jpg`, `.jpeg`, `.heic` or `.webp`), which is normal for a provider who hasn't submitted yet. Any other file type doesn't count
 - more than one claimant folder matches, in which case it prints the candidates
 - the scheduled year isn't 2026 (see the limits below)
+- More than one case matches the same screenshot (all conflicting cases are skipped).
 
 A skipped case stays in Ongoing.
 

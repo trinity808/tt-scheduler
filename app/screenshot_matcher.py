@@ -31,6 +31,7 @@ import re
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from collections import Counter
 
 import dropbox
 import gspread
@@ -99,14 +100,20 @@ def normalize_name(value):
 
 def patient_name_to_claimant_folder(patient_name):
     """
-    Convert Google Sheets Patient Name to
-    Dropbox LastNameFirstName format.
+    Convert a Google Sheets Patient Name into a normalized
+    LastNameFirstName comparison key.
 
-    Supports:
-    John Smith -> SmithJohn
-    John Michael Smith -> SmithJohn
-    John Michael David Smith -> SmithJohn
-    Khanna, Anand Michael -> KhannaAnand
+    Middle names are ignored. The returned key is lowercase
+    and alphanumeric, for comparison with normalized Dropbox
+    claimant folder names.
+
+    Examples:
+        John Smith -> smithjohn
+        John Michael Smith -> smithjohn
+        John Michael David Smith -> smithjohn
+        Khanna, Anand Michael -> khannaanand
+
+    Invalid or incomplete names return an empty string.
     """
     if patient_name is None:
         return ""
@@ -528,6 +535,41 @@ def find_claimant_submission(
 
     return matches    
 
+def split_duplicate_screenshot_matches(matches):
+    """
+    Separate matches that share a screenshot from unique matches.
+
+    Screenshot paths are compared case-insensitively because
+    Dropbox paths are case-insensitive.
+
+    If multiple cases reference the same screenshot, all
+    conflicting cases are skipped.
+
+    Returns:
+        (safe, skipped): Two lists preserving the original
+        order of matches.
+
+    The input list is not modified.
+    """
+
+    counts = Counter(
+        match["screenshot_path"].casefold()
+        for match in matches
+    )
+
+    safe = []
+    skipped = []
+
+    for match in matches:
+        screenshot_key = match["screenshot_path"].casefold()
+
+        if counts[screenshot_key] > 1:
+            skipped.append(match)
+        else:
+            safe.append(match)
+
+    return safe, skipped
+
 def move_matches(dry_run=True):
     """
     Match completed Dropbox screenshot submissions to Ongoing cases.
@@ -716,7 +758,7 @@ def move_matches(dry_run=True):
             continue
 
         print(
-            "Expected claimant folder:",
+            "Expected claimant comparison key:",
             expected_claimant,
         )
 
@@ -920,28 +962,17 @@ def move_matches(dry_run=True):
     # PREVENT DUPLICATE SCREENSHOT MATCHES
     # =====================================================
 
-    from collections import Counter
 
-    screenshot_counts = Counter(
-        match["screenshot_path"].casefold()
-        for match in matches_to_move
+    matches_to_move, duplicates = (
+        split_duplicate_screenshot_matches(matches_to_move)
     )
 
-    safe_matches = []
-
-    for match in matches_to_move:
-        screenshot_key = match["screenshot_path"].casefold()
-
-        if screenshot_counts[screenshot_key] > 1:
-            print(
-                "SKIP: Multiple cases matched screenshot:",
-                match["screenshot_path"]
-            )
-            continue
-
-        safe_matches.append(match)
-
-    matches_to_move = safe_matches
+    for match in duplicates:
+        print(
+            "SKIP: Case",
+            match["row"].get("Case ID"),
+            "shares its screenshot with another case."
+        )
 
     # =====================================================
     # NO MATCHES
