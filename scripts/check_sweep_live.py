@@ -135,8 +135,19 @@ def check(label, ok, detail=""):
 
 
 def say_on_screen(text):
-    """The sweep's output is captured while it runs, so a pause is shown on the real screen."""
-    print(text, file=sys.__stdout__)
+    """
+    The sweep's output is captured while it runs, so a pause is shown on the real
+    screen. A message must never stop a long run, so if the real screen can't be
+    written to (for example under a test runner on Windows), it goes to stderr.
+    """
+    for stream in (sys.__stdout__, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            print(text, file=stream, flush=True)
+            return
+        except (OSError, ValueError):
+            continue
 
 
 class Pacer:
