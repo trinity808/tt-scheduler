@@ -1,3 +1,7 @@
+"""
+Unit tests for screenshot matcher name conversion
+and duplicate screenshot detection.
+"""
 
 import pytest
 
