@@ -31,6 +31,7 @@ import re
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from collections import Counter
 
 import dropbox
 import gspread
@@ -96,57 +97,54 @@ def normalize_name(value):
 
     return value
 
+
 def patient_name_to_claimant_folder(patient_name):
     """
-    Converts Patient Name from Google Sheets into
-    Dropbox's LastNameFirstName format.
+    Convert a Google Sheets Patient Name into a normalized
+    LastNameFirstName comparison key.
+
+    Middle names are ignored. The returned key is lowercase
+    and alphanumeric, for comparison with normalized Dropbox
+    claimant folder names.
 
     Examples:
+        John Smith -> smithjohn
+        John Michael Smith -> smithjohn
+        John Michael David Smith -> smithjohn
+        Khanna, Anand Michael -> khannaanand
 
-        Anand Khanna
-        -> KhannaAnand
-
-        Anand R. Khanna
-        -> KhannaAnand
-
-        Khanna, Anand
-        -> KhannaAnand
-
-        James O'Brien
-        -> O'BrienJames
+    Invalid or incomplete names return an empty string.
     """
+    if patient_name is None:
+        return ""
 
     patient_name = str(patient_name).strip()
 
     if not patient_name:
         return ""
 
-    # Handle:
-    # Khanna, Anand
+    # Format: LastName, FirstName MiddleNames
     if "," in patient_name:
         last_name, remainder = patient_name.split(",", 1)
+        parts = remainder.strip().split()
 
-        name_parts = remainder.strip().split()
-
-        if not name_parts:
+        if not last_name.strip() or not parts:
             return ""
 
-        first_name = name_parts[0]
+        first_name = parts[0]
 
-        return f"{last_name.strip()}{first_name}"
+    else:
+        # Format: FirstName MiddleNames LastName
+        parts = patient_name.split()
 
-    # Handle:
-    # Anand Khanna
-    # Anand R. Khanna
-    parts = patient_name.split()
+        if len(parts) < 2:
+            return ""
 
-    if len(parts) < 2:
-        return ""
+        first_name = parts[0]
+        last_name = parts[-1]
 
-    first_name = parts[0]
-    last_name = parts[-1]
+    return normalize_name(last_name + first_name)
 
-    return f"{last_name}{first_name}"
 
 # =========================================================
 # DATE HELPERS
@@ -537,6 +535,41 @@ def find_claimant_submission(
 
     return matches    
 
+def split_duplicate_screenshot_matches(matches):
+    """
+    Separate matches that share a screenshot from unique matches.
+
+    Screenshot paths are compared case-insensitively because
+    Dropbox paths are case-insensitive.
+
+    If multiple cases reference the same screenshot, all
+    conflicting cases are skipped.
+
+    Returns:
+        (safe, skipped): Two lists preserving the original
+        order of matches.
+
+    The input list is not modified.
+    """
+
+    counts = Counter(
+        match["screenshot_path"].casefold()
+        for match in matches
+    )
+
+    safe = []
+    skipped = []
+
+    for match in matches:
+        screenshot_key = match["screenshot_path"].casefold()
+
+        if counts[screenshot_key] > 1:
+            skipped.append(match)
+        else:
+            safe.append(match)
+
+    return safe, skipped
+
 def move_matches(dry_run=True):
     """
     Match completed Dropbox screenshot submissions to Ongoing cases.
@@ -725,7 +758,7 @@ def move_matches(dry_run=True):
             continue
 
         print(
-            "Expected claimant folder:",
+            "Expected claimant comparison key:",
             expected_claimant,
         )
 
@@ -922,6 +955,23 @@ def move_matches(dry_run=True):
                     upload_time_arizona
                 ),
             }
+        )
+
+
+    # =====================================================
+    # PREVENT DUPLICATE SCREENSHOT MATCHES
+    # =====================================================
+
+
+    matches_to_move, duplicates = (
+        split_duplicate_screenshot_matches(matches_to_move)
+    )
+
+    for match in duplicates:
+        print(
+            "SKIP: Case",
+            match["row"].get("Case ID"),
+            "shares its screenshot with another case."
         )
 
     # =====================================================
