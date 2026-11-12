@@ -79,6 +79,7 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 ├── scripts/
 │   ├── check_case_metadata.py    # Live check of the stored original lists, on a scratch tab
 │   ├── check_screenshot_to_finished.py # Runs the screenshot matcher (preview by default)
+│   ├── check_sweep_live.py       # Live check of the sweep on scratch tabs: scenarios 1 to 16
 │   └── check_sheet_connection.py # Live check against your own sandbox sheet
 ├── templates/                    # Local only, not in the repository (see below)
 ├── testing pdfs/                 # Local only, not in the repository (see below)
@@ -724,7 +725,7 @@ Problems appear in the report, and as a note on cell A1 of the Services tab. The
 | `... (kept: the cell has it from an earlier change, but this comment no longer includes it. ...)` | A change was applied before, and its line is gone from the comment. The test stays. Put the line back to keep it as a change, or delete the test's line from the cell to remove it. |
 | `... (kept: the cell has this line, but it isn't in the PDF's list or this comment. ...)` | Someone typed a line into the cell. It stays. Add it to the comment to keep it as a change, or delete it from the cell. |
 | `... (dropped: ...)` | An earlier change conflicts with the new comment, so it was removed from the cell. The reason is in the line. |
-| `Services Requested  (not changed: ...)` | The case's tests were left alone. The reason says why: a line in the cell can't be read, the original tests weren't saved and the cell is already changed, the case has no tests recorded, the saved original belongs to a different case, or saving the original failed. |
+| `Services Requested  (not changed: ...)` | The case's tests were left alone. The reason says why: a line in the cell can't be read, the original tests weren't saved and the cell is already changed, the case has no tests recorded, the saved original belongs to a different case (`Row N: the stored test list is for case X, not Y, so it was ignored`), or saving the original failed. |
  
 A comment that was cleared completely, while its changes still show in the cell, also gets an orange Comments cell, with `kept` lines, although the cell is empty. Put the lines back, or delete the tests from the cell, and it clears.
  
@@ -868,7 +869,49 @@ Add: wms
 5. Run `--live` again. It should write nothing and say `Tests: already up to date, no change`.
 6. Make a deliberate typo in the comment, such as `Provder:`, and run the sweep again. The Comments cell should turn orange with a note that suggests the right spelling.
  
-For the full set of checks after a change to the sweep, including rewritten and cleared comments, rows that move, cases that can't be updated, and two sweeps running at once, follow [docs/manual_check_apply_test_changes.md](docs/manual_check_apply_test_changes.md).
+For the full set of checks after a change to the sweep, including rewritten and cleared comments, rows that move, cases that can't be updated, and two sweeps running at once, follow [docs/manual_check_apply_test_changes.md](docs/manual_check_apply_test_changes.md). Scenarios 1 to 16 can also be run automatically, with [the live check](#live-check-of-the-sweep).
+
+### Live check of the sweep
+ 
+`scripts/check_sweep_live.py` runs scenarios 1 to 16 of the [manual check](docs/manual_check_apply_test_changes.md) automatically, against the real Google Sheets API, so a change to the sweep can be re-verified in one command. Use your own sandbox sheet, never production.
+ 
+```bash
+python -m scripts.check_sweep_live                 # everything
+python -m scripts.check_sweep_live --list          # show the groups, and touch nothing
+python -m scripts.check_sweep_live --only 6,15     # just these scenarios, with their groups
+python -m scripts.check_sweep_live --only moves    # just one group
+```
+ 
+It prints the sandbox sheet's title first, then each check as `[OK]` or `[FAILED]`, and ends with a count. The exit code is 0 only if every check passed.
+ 
+**How it stays safe**
+ 
+- It works only on scratch tabs that it creates, named `SweepCheck ...`, and deletes them at the end. A scratch tab left by a run that failed is removed at the start of the next one.
+- The sweep is handed a stand-in spreadsheet that gives it only those tabs and refuses every other name, even if a real tab has that name, so it can't reach a real tab.
+- Everything the sweep reads and writes is made up by the script, including a small Services table, so a result never depends on what the sandbox happens to hold.
+- It runs the sweep's real command line from a temporary folder, so its lock file and logs never touch the project folder.
+ 
+**Groups.** Scenarios that share sweeps run together, each group on a scratch tab of its own, so a group can be run alone. Asking for one scenario runs its whole group, and says so.
+ 
+| Group | Scenarios |
+|---|---|
+| `chain` | 1, 2, 3 |
+| `flags` | 4, 5, 10 |
+| `nothing-stored` | 11, 12, 13, 14 |
+| `rewrites` | 6, 7, 8, 9 |
+| `moves` | 15, 16 |
+ 
+**Why it takes a while.** Google allows 60 read requests a minute per user, and the sweep and the checks together would spend that quickly. Every request goes through a pacer that keeps to 45 a minute, and a request refused for being over the limit is tried again after a pause. A full run takes several minutes, and a single group takes less. Lines such as `(pausing 51 s to stay under Google's per-minute request limit)` are normal.
+ 
+**Reading a failure.** The sweep's report is printed above the checks, and a failing check says what it expected and what it found. Compare that with the scenario in the manual check. A mismatch is either a bug, or a rule worth changing on purpose. If it is a rule, change the code, the tests, the README, the manual check, and the script together, and take a scenario's expected results from the manual check, not from what the sweep happened to print.
+ 
+**What it doesn't cover**
+ 
+- Scenarios 17 (the pause) and 18 (the lock, including two real processes at once) stay in the manual check and the unit tests.
+- The orange fill on the Comments cell. It checks the note, which the sweep writes together with the fill.
+- The screenshot matcher, the DOCX pipeline, and Task Scheduler.
+ 
+The helpers that need no Google (the request pacer and its retry, choosing which scenarios to run, and picking a case out of a report) are tested in `tests/test_check_sweep_live.py`, which runs with the rest of the suite.
 
 ## Troubleshooting
 

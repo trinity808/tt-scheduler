@@ -2,6 +2,8 @@
 
 A step-by-step check to run on a sandbox sheet after changing how the sweep applies test changes. It covers what tests with in-memory sheets can't show: how real Google Sheets behaves. Run `python -m pytest` first.
 
+Scenarios 1 to 16 can also be run automatically, on scratch tabs, with `python -m scripts.check_sweep_live`. See [Live check of the sweep](../README.md#live-check-of-the-sweep). Scenarios 17 and 18 are not part of it, so they stay here. When a check in the script fails, the matching scenario below says what it is meant to show.
+
 Use your own sandbox sheet, never production. The rules being checked are described in the README, under "How test changes are applied" and "Flags on the sheet".
 
 ## How to run each scenario
@@ -54,7 +56,7 @@ Preview should say:
 
 Live should give:
 - [ ] The report says the same, in the past tense (`set to`, `Tests updated:`).
-- [ ] Services Requested has four lines. The first three are exactly as before. The fourth is `4. 96101-WMS-IV - <its Name> (added)`.
+- [ ] Services Requested has four entries, with a line of underscores between each. The first three are exactly as before. The fourth is `4. 96101-WMS-IV - <its Name> (added)`.
 - [ ] Provider reads `Dr. Doe` and Psychometrist reads `J. Smith`.
 - [ ] Price is untouched. The Comments cell is not orange and has no note.
 - [ ] A second `--live` says `Provider: already Dr. Doe, no change`, the same for Psychometrist, and `Tests: already up to date, no change`.
@@ -79,7 +81,7 @@ Add: cars
 ```
 
 - [ ] Report: `add 96130-CARS-2`, and nothing about the earlier changes.
-- [ ] The cell now has five lines, with CARS-2 last, marked `(added)`.
+- [ ] The cell now has five entries, with CARS-2 last, marked `(added)`.
 - [ ] The Comments cell is still clean.
 
 ## 3. Changing back (continue from scenario 2)
@@ -171,6 +173,7 @@ Now edit the comment to add `Add: wiat` and run again:
 
 - [ ] WIAT-III is added, and the hand-typed line stays, with its own words, now marked `(added)`.
 - [ ] The note has a `kept` line for CARS-2 that says the cell has this line but it isn't in the PDF's list or this comment (it was typed by hand, so it doesn't say "from an earlier change").
+- [ ] Run again. The line now carries an `(added)` marker, so the note describes it as `from an earlier change` and no longer as typed by hand. The flag stays, and this is expected.
 
 ## 10. A line the system can't read (State A)
 
