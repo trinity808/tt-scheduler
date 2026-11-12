@@ -215,12 +215,13 @@ def test_only_a_429_counts_as_over_the_limit():
 
 # --- Choosing what to run -------------------------------------------
 
-GROUP_NAMES = ["chain", "flags", "nothing-stored", "rewrites", "moves"]
+GROUP_NAMES = ["chain", "flags", "nothing-stored", "rewrites", "moves", "interrupted-move"]
 
 
-def test_every_scenario_from_1_to_16_belongs_to_exactly_one_group():
+def test_every_scenario_the_script_covers_belongs_to_exactly_one_group():
+    # 17 (the pause) and 18 (the lock) are not in the script. They stay in the manual check.
     numbers = [n for _, scenarios, _ in live.GROUPS for n in scenarios]
-    assert sorted(numbers) == list(range(1, 17))
+    assert sorted(numbers) == list(range(1, 17)) + [19]
 
 
 @pytest.mark.parametrize("only, expected", [
@@ -229,6 +230,8 @@ def test_every_scenario_from_1_to_16_belongs_to_exactly_one_group():
     ("6", ["rewrites"]),
     ("7,9", ["rewrites"]),
     ("15", ["moves"]),
+    ("19", ["interrupted-move"]),
+    ("16,19", ["moves", "interrupted-move"]),
     ("6,15", ["rewrites", "moves"]),
     ("15,6", ["rewrites", "moves"]),                   # always in the usual order
     ("moves", ["moves"]),
@@ -250,8 +253,8 @@ def test_the_error_for_a_bad_choice_lists_what_is_valid():
     with pytest.raises(ValueError) as caught:
         live.choose_groups("99")
     text = str(caught.value)
-    assert "Scenarios: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16." in text
-    assert "Groups: chain, flags, nothing-stored, rewrites, moves." in text
+    assert "Scenarios: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 19." in text
+    assert "Groups: chain, flags, nothing-stored, rewrites, moves, interrupted-move." in text
 
 
 def test_the_listing_names_every_group_and_its_scenarios():
@@ -357,3 +360,42 @@ def test_the_expected_lines_match_how_a_cell_is_really_laid_out():
     assert live.build_cell(env.separator, env.original_lines) == env.plain
     assert env.cars4.startswith("4. ") and env.cars5.startswith("5. ")
     assert env.wais_swapped.endswith("(changed from 96101-WISC-V)")
+
+
+# --- The helpers for an interrupted move ----------------------------
+
+
+class Worksheet:
+    def __init__(self):
+        self.title, self.deleted = "tab", []
+
+    def get_all_values(self):
+        return [["Case ID"], ["S1"]]
+
+    def delete_rows(self, row):
+        self.deleted.append(row)
+
+
+def test_a_worksheet_that_fails_to_delete_is_otherwise_the_one_it_wraps():
+    real = Worksheet()
+    wrapped = live.FailsToDelete(real)
+    assert wrapped.title == "tab"
+    assert wrapped.get_all_values() == [["Case ID"], ["S1"]]
+
+
+def test_a_worksheet_that_fails_to_delete_does_not_delete():
+    real = Worksheet()
+    with pytest.raises(RuntimeError, match="API error"):
+        live.FailsToDelete(real).delete_rows(2)
+    assert real.deleted == []
+
+
+def test_the_log_catcher_keeps_the_warnings_of_one_logger_until_it_is_closed():
+    import logging
+    logger = logging.getLogger("tests.log_catcher")
+    catcher = live.LogCatcher("tests.log_catcher")
+    logger.warning("first %s", "one")
+    logger.info("not kept")
+    catcher.close()
+    logger.warning("after closing")
+    assert catcher.messages == ["first one"]

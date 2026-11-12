@@ -2,7 +2,7 @@
 
 A step-by-step check to run on a sandbox sheet after changing how the sweep applies test changes. It covers what tests with in-memory sheets can't show: how real Google Sheets behaves. Run `python -m pytest` first.
 
-Scenarios 1 to 16 can also be run automatically, on scratch tabs, with `python -m scripts.check_sweep_live`. See [Live check of the sweep](../README.md#live-check-of-the-sweep). Scenarios 17 and 18 are not part of it, so they stay here. When a check in the script fails, the matching scenario below says what it is meant to show.
+Scenarios 1 to 16 and 19 can also be run automatically, on scratch tabs, with `python -m scripts.check_sweep_live`. See [Live check of the sweep](../README.md#live-check-of-the-sweep). Scenarios 17 and 18 are not part of it, so they stay here. When a check in the script fails, the matching scenario below says what it is meant to show.
 
 Use your own sandbox sheet, never production. The rules being checked are described in the README, under "How test changes are applied" and "Flags on the sheet".
 
@@ -333,6 +333,18 @@ rm a.txt b.txt
 - [ ] A `KeyboardInterrupt` traceback, and no `sweep.lock` left behind. A run killed harder, without cleanup, leaves the lock to heal after the limit, as in the first part of this scenario.
  
 Finish with `rm -f sweep.lock`.
+
+## 19. A move that was interrupted
+ 
+A move writes the case to Finished and only then deletes it from Ongoing, so a failure in between leaves it in both tabs. Running the move again must finish the job without adding a second Finished row.
+ 
+Use a case that is still in Ongoing, and write its row into Finished by hand, with the same Case ID, Patient Name, Provider, Psychometrist, and Price. That is the state an interrupted move leaves. Then run `python -m app.sheet_case_mover` and move that case.
+ 
+- [ ] It prints a warning, `Case ID ... was already in Finished (row N), so no row was added`, and then `Moved Case ID ... to Finished (row N)`.
+- [ ] Finished still has the case once, and the Ongoing row is gone.
+- [ ] Do it again with Date Completed left blank in the hand-made row, and enter a Date Completed when asked. It is filled in, the warning ends `Filled in: Date Completed.`, and no other cell changes.
+- [ ] Change the Price in the hand-made Finished row, and run it again. It stops with `Not moved: ... different values for: Price. Nothing was changed.`, and the case stays in Ongoing.
+- [ ] Put two rows with the same Case ID in Finished. It stops with `... appears 2 times in Finished (rows N, M) ...`, and changes nothing.
 
 ---
 
