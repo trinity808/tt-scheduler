@@ -79,7 +79,7 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 ├── scripts/
 │   ├── check_case_metadata.py    # Live check of the stored original lists, on a scratch tab
 │   ├── check_screenshot_to_finished.py # Runs the screenshot matcher (preview by default)
-│   ├── check_sweep_live.py       # Live check of the sweep on scratch tabs: scenarios 1 to 16
+│   ├── check_sweep_live.py       # Live check of the sweep on scratch tabs: scenarios 1 to 16 and 19
 │   └── check_sheet_connection.py # Live check against your own sandbox sheet
 ├── templates/                    # Local only, not in the repository (see below)
 ├── testing pdfs/                 # Local only, not in the repository (see below)
@@ -869,11 +869,11 @@ Add: wms
 5. Run `--live` again. It should write nothing and say `Tests: already up to date, no change`.
 6. Make a deliberate typo in the comment, such as `Provder:`, and run the sweep again. The Comments cell should turn orange with a note that suggests the right spelling.
  
-For the full set of checks after a change to the sweep, including rewritten and cleared comments, rows that move, cases that can't be updated, and two sweeps running at once, follow [docs/manual_check_apply_test_changes.md](docs/manual_check_apply_test_changes.md). Scenarios 1 to 16 can also be run automatically, with [the live check](#live-check-of-the-sweep).
+For the full set of checks after a change to the sweep, including rewritten and cleared comments, rows that move, cases that can't be updated, and two sweeps running at once, follow [docs/manual_check_apply_test_changes.md](docs/manual_check_apply_test_changes.md). Scenarios 1 to 16 and 19 can also be run automatically, with [the live check](#live-check-of-the-sweep).
 
 ### Live check of the sweep
  
-`scripts/check_sweep_live.py` runs scenarios 1 to 16 of the [manual check](docs/manual_check_apply_test_changes.md) automatically, against the real Google Sheets API, so a change to the sweep can be re-verified in one command. Use your own sandbox sheet, never production.
+`scripts/check_sweep_live.py` runs scenarios 1 to 16 and 19 of the [manual check](docs/manual_check_apply_test_changes.md) automatically, against the real Google Sheets API, so a change to the sweep can be re-verified in one command. Use your own sandbox sheet, never production.
  
 ```bash
 python -m scripts.check_sweep_live                 # everything
@@ -900,6 +900,9 @@ It prints the sandbox sheet's title first, then each check as `[OK]` or `[FAILED
 | `nothing-stored` | 11, 12, 13, 14 |
 | `rewrites` | 6, 7, 8, 9 |
 | `moves` | 15, 16 |
+| `interrupted-move` | 19 |
+
+Scenario 19 runs the real `move_case_to_finished` with a worksheet whose delete fails, so that a move is interrupted after the case has been written to Finished. It then checks that running the move again adds no second row and finishes the job, that a blank cell is filled in, and that a Finished row which disagrees, or a case in Finished twice, makes it refuse and change nothing.
  
 **Why it takes a while.** Google allows 60 read requests a minute per user, and the sweep and the checks together would spend that quickly. Every request goes through a pacer that keeps to 45 a minute, and a request refused for being over the limit is tried again after a pause. A full run takes several minutes, and a single group takes less. Lines such as `(pausing 51 s to stay under Google's per-minute request limit)` are normal.
  
