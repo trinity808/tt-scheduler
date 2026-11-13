@@ -1,5 +1,14 @@
-# Secrets
+
+# Secrets and environment variables
 .env
+.env.*
+!.env.example
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
 
 # Planning doc — living/in-progress, not tracked system state
 scope.pdf
@@ -33,6 +42,7 @@ Desktop.ini
 # Editor
 .vscode/
 .idea/
+
 # Never re-add — this repo intentionally excludes these
 templates/
 testing pdfs/
