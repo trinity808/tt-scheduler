@@ -97,6 +97,13 @@ from app.case_metadata import (
     set_case_tests,
 )
 from app.comment_parser import parse_comment
+from app.contacts_tab import (
+    PROVIDER_EMAIL_HEADER,
+    PSYCHOMETRIST_EMAIL_HEADER,
+    ContactsTab,
+    flag_contacts_tab,
+    load_contacts_tab,
+)
 from app.config_loader import load_config
 from app.health_monitor import notify_error, setup_logging
 from app.run_lock import LockHeld, acquire, describe, minutes_from_config, release
@@ -197,7 +204,73 @@ def _apply_services(
     return _services_outcome("unchanged", update, before=before), flags
 
 
-def apply_comment_updates(worksheet, lookup=None, metadata=None, dry_run=False):
+def _example_name(role, listed_name=None):
+    """A name to show OA as an example of what to write."""
+    if listed_name:
+        listed = listed_name.strip()
+        return listed if role != "provider" or listed.casefold().startswith("dr") else f"Dr {listed}"
+    return "Dr Smith" if role == "provider" else "John Doe"
+
+
+def _sync_email(
+    worksheet, row_number, header, typed_name, role, name_changed, current, contacts, dry_run
+):
+    """
+    Fills one email column of a case from the Contacts tab. Returns (outcome, flag),
+    where flag is None if nothing needs attention.
+
+    The outcome's status is one of:
+      set         the cell was blank and now has the person's address
+      updated     the cell had a different address, and it was replaced
+      unchanged   the cell already has it
+      cleared     the person couldn't be found and the name has just changed, so the
+                  old address, which now belongs to someone else, was removed
+      unknown, ambiguous, too_short, no_tab
+                  the person couldn't be found, and why. The cell is left alone
+    The outcome has the person's name as listed in the tab, never their address:
+    reports, logs and notes must not carry addresses.
+    """
+    current = current.strip()
+    if contacts is None:
+        match, status = None, "no_tab"
+    else:
+        match = contacts.find(typed_name, role)
+        status = match.status
+
+    if status == "found":
+        if current == match.email:
+            return {"status": "unchanged", "contact": match.name}, None
+        if not dry_run:
+            update_case_field(worksheet, row_number, header, match.email)
+        return {"status": "updated" if current else "set", "contact": match.name}, None
+
+    if status == "no_tab":
+        reason = "the Contacts tab couldn't be used, so emails can't be looked up"
+    elif status == "unknown":
+        reason = f"'{typed_name}' isn't in the Contacts tab. Add them there, or check the spelling"
+    elif status == "too_short":
+        reason = (
+            f"'{typed_name}' is too short to match. Write the name in full, "
+            f"for example '{_example_name(role)}'"
+        )
+    else:
+        reason = (
+            f"'{typed_name}' could be {', '.join(match.options)}. Write more of the name, "
+            f"for example '{_example_name(role, match.options[0])}'"
+        )
+
+    cleared = bool(current) and name_changed
+    if cleared:
+        if not dry_run:
+            update_case_field(worksheet, row_number, header, "")
+        reason += ". The old address was cleared"
+    return (
+        {"status": "cleared" if cleared else status, "contact": ""},
+        f"{header}  (not filled in: {reason})",
+    )
+
+
+def apply_comment_updates(worksheet, lookup=None, metadata=None, dry_run=False, contacts=None):
     """
     Reads every case row's Comments cell, parses it, applies
     Provider/Psychometrist where present and changed, applies test
@@ -212,6 +285,13 @@ def apply_comment_updates(worksheet, lookup=None, metadata=None, dry_run=False):
     `metadata` is a client for the hidden per-row storage (see
     case_metadata.py). With one, test changes are applied to the
     Services Requested cell. Without one, they're only reported.
+
+    `contacts` is a ContactLookup (see contact_lookup.py). When the sheet has
+    "Provider Email" or "Psychometrist Email" columns, the provider and
+    psychometrist a comment names are looked up in it and their address is put in
+    the matching column, so the reminders can read it from the row. Without those
+    columns nothing about emails happens. With the columns but no lookup, a name
+    in a comment is flagged as "the Contacts tab couldn't be used".
 
     With `dry_run`, nothing is written, but every outcome is worked out
     and returned as if it had been. "updated" then means "would be".
@@ -228,6 +308,9 @@ def apply_comment_updates(worksheet, lookup=None, metadata=None, dry_run=False):
             "services": {"status": "updated", "update": ServicesUpdate, "detail": ""},
         }
     "fields" only contains fields the comment actually mentioned.
+    "emails" is only there when the sheet has the email columns and the comment
+    names someone: {"Provider Email": {"status": "set", "contact": "Dr. Jane Smith"}}.
+    See _sync_email() for the statuses. It never holds an address.
     "services" says what happened to the case's tests; see
     _services_outcome() for the statuses.
     """
@@ -243,6 +326,14 @@ def apply_comment_updates(worksheet, lookup=None, metadata=None, dry_run=False):
     provider_idx = header_map["Provider"] - 1
     psychometrist_idx = header_map["Psychometrist"] - 1
     services_idx = header_map[SERVICES_COLUMN] - 1 if SERVICES_COLUMN in header_map else None
+    provider_email_idx = (
+        header_map[PROVIDER_EMAIL_HEADER] - 1 if PROVIDER_EMAIL_HEADER in header_map else None
+    )
+    psychometrist_email_idx = (
+        header_map[PSYCHOMETRIST_EMAIL_HEADER] - 1
+        if PSYCHOMETRIST_EMAIL_HEADER in header_map
+        else None
+    )
 
     applying = metadata is not None and services_idx is not None
     stored = read_all_case_tests(metadata) if applying else None
@@ -284,6 +375,25 @@ def apply_comment_updates(worksheet, lookup=None, metadata=None, dry_run=False):
 
         flags = list(parsed.unrecognized_lines)
 
+        email_outcomes = {}
+        for header, name, role, idx, field in (
+            (PROVIDER_EMAIL_HEADER, parsed.provider, "provider", provider_email_idx, "Provider"),
+            (
+                PSYCHOMETRIST_EMAIL_HEADER, parsed.psychometrist, "psychometrist",
+                psychometrist_email_idx, "Psychometrist",
+            ),
+        ):
+            if not name or idx is None:
+                continue
+            outcome, flag = _sync_email(
+                worksheet, row_number, header, name, role,
+                field_outcomes.get(field, ("unchanged",))[0] == "updated",
+                row[idx] if idx < len(row) else "", contacts, dry_run,
+            )
+            email_outcomes[header] = outcome
+            if flag:
+                flags.append(flag)
+
         if metadata is None:
             services = _services_outcome("not_applied")
         elif services_idx is None:
@@ -307,6 +417,7 @@ def apply_comment_updates(worksheet, lookup=None, metadata=None, dry_run=False):
             "fields": field_outcomes,
             "flags": flags,
             "services": services,
+            **({"emails": email_outcomes} if email_outcomes else {}),
         })
 
     return results
@@ -320,6 +431,8 @@ class SweepReport:
                            # "unchanged", "skipped" or "no_tab". In a dry run it
                            # is "dry_run" (nothing was noted), or "no_tab".
     dry_run: bool = False  # True if nothing was written
+    contacts: ContactsTab = None  # what loading the Contacts tab produced
+    contacts_flag: str = "skipped"  # what flag_contacts_tab() did, as services_flag
 
 
 def run_sweep(spreadsheet, metadata=None, dry_run=False):
@@ -331,6 +444,10 @@ def run_sweep(spreadsheet, metadata=None, dry_run=False):
     one they are only reported. With dry_run, nothing is written
     anywhere, the Services tab included.
 
+    The Contacts tab is loaded and flagged the same way, and fills the email
+    columns when the sheet has them. A Contacts tab that can't be used never
+    stops the sweep either.
+
     A Services tab that can't be used never stops the sweep. Provider
     and Psychometrist still apply, and test lines are flagged as
     "services list not loaded". A missing Ongoing tab does stop it
@@ -341,11 +458,17 @@ def run_sweep(spreadsheet, metadata=None, dry_run=False):
         services_flag = "no_tab" if services.worksheet is None else "dry_run"
     else:
         services_flag = flag_services_tab(services.worksheet, services.problems)
+    contacts = load_contacts_tab(spreadsheet)
+    if dry_run:
+        contacts_flag = "no_tab" if contacts.worksheet is None else "dry_run"
+    else:
+        contacts_flag = flag_contacts_tab(contacts.worksheet, contacts.problems)
     results = apply_comment_updates(
-        spreadsheet.worksheet(ONGOING_TAB), services.lookup, metadata, dry_run
+        spreadsheet.worksheet(ONGOING_TAB), services.lookup, metadata, dry_run, contacts.lookup
     )
     return SweepReport(
-        results=results, services=services, services_flag=services_flag, dry_run=dry_run
+        results=results, services=services, services_flag=services_flag, dry_run=dry_run,
+        contacts=contacts, contacts_flag=contacts_flag,
     )
 
 
