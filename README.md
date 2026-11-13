@@ -506,6 +506,7 @@ Names are matched ignoring capitals, accents, punctuation, a leading `Dr`, and m
 - A name it can't resolve is flagged on the Comments cell, in the usual orange note, and the email cell is left alone. The flag says what to do.
 - If the provider has just **changed** and the new one can't be found, the old address is cleared, because it now belongs to someone else, and a reminder to the wrong person is worse than none.
 - Problems with the tab itself (a row with no valid address, a name listed twice, a missing column) are noted on its `A1` cell, which clears itself once they are fixed. A missing or unusable `Contacts` tab never stops the sweep.
+- The report says, for each case, whether the email was filled in, by the person's name, and the summary counts them. It never prints an address.
 
 ### Adding a case
 
@@ -1103,7 +1104,6 @@ Use your own Dropbox app and your own copy of the sheet while developing. Produc
 - A person's last name is matched on its last word, so a name such as `de la Cruz` is matched as `Cruz`. A suffix such as `Jr` would be taken as the last name.
 - Someone listed in the `Contacts` tab by last name only (`Shelton`) matches any first name or initial typed with it.
 - The sweep fills the email columns for a case only while its comment names the provider or psychometrist. Comments are edited and not rewritten, so this holds in practice, but a case whose comment never names one is not filled.
-- The report doesn't yet say which emails were set. A name that couldn't be resolved is reported, since it's a flag.
 
 ### Contributing
 
