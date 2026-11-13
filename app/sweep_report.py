@@ -6,12 +6,16 @@ capturing console output: format_report() takes a SweepReport (see
 apply_comment_updates.py) and returns a string.
 
 Order: a preview banner if nothing was written, problems with the Services
-tab, then each case, then a summary.
+tab, problems with the Contacts tab, then each case, then a summary.
 
 For each case it says what this run changed, not what the cell says now:
 which tests were added, swapped, restored, or removed compared with the cell
 as it was. A case that was already up to date says so. The Comments cell's
 own note carries the full detail of anything flagged.
+
+When the sheet has the email columns (see contacts_tab.py), a case that names a
+provider or a psychometrist also says whether their email was filled in, by the
+person's name. An address is never printed, here or in the log line.
 
 In a preview (a dry run) the same report is written in the conditional,
 "would be updated", and ends with the command that applies it for real.
@@ -25,6 +29,8 @@ disagree with the report.
 """
 
 from dataclasses import dataclass, field
+
+from app.contacts_tab import PROVIDER_EMAIL_HEADER, PSYCHOMETRIST_EMAIL_HEADER
 
 APPLY_COMMAND = "python -m app.apply_comment_updates --live"
 
@@ -49,6 +55,65 @@ def _services_section(report):
         return lines
     if report.services_flag == "cleared":
         return ["Services tab problems are fixed, so its note was cleared."]
+    return []
+
+
+_CONTACTS_FLAG_NOTES = {
+    "flagged": "(noted on the Contacts tab)",
+    "unchanged": "(already noted on the Contacts tab)",
+    "skipped": "(couldn't note this on the Contacts tab: "
+               "cell A1 already has someone else's note)",
+    "dry_run": "(dry run: not noted on the Contacts tab)",
+    "no_tab": "",  # the problem itself already says the tab is missing
+}
+
+
+def _contacts_section(report):
+    """
+    Problems with the Contacts tab. A missing tab is only worth saying when the
+    email columns are in use, so a sheet that hasn't switched emails on stays quiet.
+    """
+    contacts = getattr(report, "contacts", None)
+    if contacts is None:
+        return []
+    in_use = any("emails" in result for result in report.results)
+    if contacts.problems and (contacts.worksheet is not None or in_use):
+        lines = ["Contacts tab needs attention:"]
+        lines += [f"  - {problem}" for problem in contacts.problems]
+        note = _CONTACTS_FLAG_NOTES.get(getattr(report, "contacts_flag", ""), "")
+        if note:
+            lines.append(f"  {note}")
+        return lines
+    if getattr(report, "contacts_flag", "") == "cleared":
+        return ["Contacts tab problems are fixed, so its note was cleared."]
+    return []
+
+
+_EMAIL_HEADERS = {
+    "Provider": PROVIDER_EMAIL_HEADER,
+    "Psychometrist": PSYCHOMETRIST_EMAIL_HEADER,
+}
+
+
+def _email_lines(result, field, dry_run):
+    """
+    What happened to a provider's or psychometrist's email, by the person's name.
+    An email that couldn't be filled in has no line here: it is already under
+    NEEDS ATTENTION, with what to do about it.
+    """
+    outcome = result.get("emails", {}).get(_EMAIL_HEADERS.get(field, ""))
+    if outcome is None:
+        return []
+    label, who, status = f"{field} email", outcome["contact"], outcome["status"]
+    if status == "set":
+        return [f"  {label}: {'would be set' if dry_run else 'set'} for {who}"]
+    if status == "updated":
+        return [f"  {label}: {'would be updated' if dry_run else 'updated'} for {who}"]
+    if status == "unchanged":
+        return [f"  {label}: already filled in for {who}, no change"]
+    if status == "cleared":
+        cleared = "old address would be cleared" if dry_run else "old address cleared"
+        return [f"  {label}: {cleared}, as the new {field.lower()} couldn't be found"]
     return []
 
 
@@ -158,6 +223,7 @@ def _case_section(result, dry_run):
             lines.append(f"  {field}: {verb} to {new}")
         else:
             lines.append(f"  {field}: already {new}, no change")
+        lines += _email_lines(result, field, dry_run)
 
     lines += test_lines
 
@@ -175,6 +241,8 @@ class SummaryCounts:
     changes_found: int = 0    # test changes found but not applied (no metadata client)
     tests_updated: int = 0    # cases whose tests were updated (or would be)
     originals_saved: int = 0  # original test lists saved (or that would be)
+    emails_filled: int = 0    # email addresses set or replaced (or that would be)
+    emails_cleared: int = 0   # old email addresses removed (or that would be)
     flagged: list = field(default_factory=list)  # Case IDs needing attention
 
 
@@ -193,6 +261,11 @@ def summary_counts(report):
             counts.tests_updated += 1
         if _saved_original(result) is not None:
             counts.originals_saved += 1
+        for outcome in result.get("emails", {}).values():
+            if outcome["status"] in ("set", "updated"):
+                counts.emails_filled += 1
+            elif outcome["status"] == "cleared":
+                counts.emails_cleared += 1
         if _flags(result):
             counts.flagged.append(result["case_id"])
 
@@ -209,6 +282,10 @@ def format_report(report):
     services = _services_section(report)
     if services:
         sections.append(services)
+
+    contacts = _contacts_section(report)
+    if contacts:
+        sections.append(contacts)
 
     if any(_status(result) == "no_column" for result in report.results):
         sections.append([
@@ -230,6 +307,16 @@ def format_report(report):
         f"{counts.fields_updated} field(s) {'would be updated' if dry_run else 'updated'}, "
         f"{len(flagged)} flagged for attention."
     ]
+    if counts.emails_filled:
+        summary_lines.append(
+            f"{counts.emails_filled} email address(es) "
+            f"{'would be filled in' if dry_run else 'filled in'}."
+        )
+    if counts.emails_cleared:
+        summary_lines.append(
+            f"{counts.emails_cleared} old email address(es) "
+            f"{'would be cleared' if dry_run else 'cleared'}."
+        )
     if counts.changes_found:
         summary_lines.append(
             f"{counts.changes_found} test change(s) found, not applied to the sheet yet."
@@ -275,6 +362,16 @@ def summary_line(report, seconds):
         parts.append(
             f"{counts.originals_saved} original list(s) "
             f"{'that would be saved' if dry_run else 'saved'}"
+        )
+    if counts.emails_filled:
+        parts.append(
+            f"{counts.emails_filled} email(s) "
+            f"{'that would be filled in' if dry_run else 'filled in'}"
+        )
+    if counts.emails_cleared:
+        parts.append(
+            f"{counts.emails_cleared} email(s) "
+            f"{'that would be cleared' if dry_run else 'cleared'}"
         )
     parts.append(f"{seconds:.1f}s")
 

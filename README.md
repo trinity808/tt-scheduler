@@ -52,6 +52,8 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 │   ├── case_metadata.py          # Saves each case's original test list as hidden data on its row (the rules)
 │   ├── comment_parser.py         # Parses the Comments column format
 │   ├── config_loader.py          # Loads config/settings.json
+│   ├── contact_lookup.py         # Matches the names in comments to the people in the Contacts tab
+│   ├── contacts_tab.py           # Loads the Contacts tab, and notes its problems on the tab
 │   ├── file_utils.py             # Unused, kept from the original project
 │   ├── health_monitor.py         # Logging, startup checks, email alerts
 │   ├── ongoing_row_mapper.py     # Maps an extracted PDF to an Ongoing row, adds or updates it
@@ -470,6 +472,42 @@ These columns are a draft and may change. If you rename or remove one, search th
 
 Who fills what on the Ongoing tab: everything up to `Allegations`, plus `Price`, comes from the PDF. `Services Requested` also comes from the PDF, and the sweep adds to it when OA's comment asks for test changes. `Psychometrist` and `Provider` are filled by the sweep from the Comments column. `Comments` is written by OA. `Price` is the total printed on the PDF. Final billed amounts are set separately on the billing request forms and are not tracked here, and the sweep never changes `Price`.
 
+### The Contacts tab: provider and psychometrist emails
+ 
+The reminders need an email address for the provider and the psychometrist of each case. Nobody types addresses into comments. OA keeps writing names, and the sweep looks each name up in a tab and puts the address on the case's row, where the reminders read it.
+ 
+It needs two things on the sheet:
+ 
+- A tab named `Contacts`, with the columns `Name` and `Email`, and optionally `Role`, which is `Provider` or `Psychometrist`. Columns are found by header name, so their order doesn't matter.
+- Two columns on the Ongoing tab, named `Provider Email` and `Psychometrist Email`. **Until they exist, the sweep does nothing about emails**, so adding them is what switches this on.
+ 
+| Name | Email | Role |
+|---|---|---|
+| Dr. Jane Smith | jane.smith@example.test | Provider |
+| John Doe | john.doe@example.test | Psychometrist |
+ 
+The tab is set up once, with each person's name and address, and OA (or Dr.) adds a row when someone new starts. The real addresses live only in the sheet. They are never in the repository, the logs, the report, or a note.
+ 
+**How OA writes names.** In the comment, as before:
+ 
+```
+Provider: Dr Smith
+Psychometrist: John Doe
+```
+ 
+- **Provider:** `Dr` and the last name in full. Add the first initial (`Dr J Smith`) only if two providers share a last name. The sweep says so, and what to write, when it matters. An initial alone (`Dr S`) can't be matched.
+- **Psychometrist:** the full name, `John Doe`. `J. Doe` also works while only one J. Doe is listed.
+ 
+Names are matched ignoring capitals, accents, punctuation, a leading `Dr`, and middle names. `Role` keeps a provider `Smith` and a psychometrist `Smith` apart. A row with no role counts as both. A name that fits two people is never guessed.
+ 
+**What the sweep does**
+ 
+- For each case whose comment names a provider or a psychometrist, it fills the matching email column. It checks again on every run, so a corrected address in the tab reaches the row on the next sweep, and an address typed into the cell by hand is replaced by the tab's.
+- A name it can't resolve is flagged on the Comments cell, in the usual orange note, and the email cell is left alone. The flag says what to do.
+- If the provider has just **changed** and the new one can't be found, the old address is cleared, because it now belongs to someone else, and a reminder to the wrong person is worse than none.
+- Problems with the tab itself (a row with no valid address, a name listed twice, a missing column) are noted on its `A1` cell, which clears itself once they are fixed. A missing or unusable `Contacts` tab never stops the sweep.
+- The report says, for each case, whether the email was filled in, by the person's name, and the summary counts them. It never prints an address.
+
 ### Adding a case
 
 ```bash
@@ -713,6 +751,11 @@ Problems appear in the report, and as a note on cell A1 of the Services tab. The
 | An orange Comments cell, with a note | A line in the comment couldn't be used, or something about the case's tests needs attention. Each line of the note says what and why. | Yes, once the comment is fixed and the sweep runs again |
 | A yellow row, with a note on the Case ID cell saying "Duplicate entry received" | The same case arrived again. Details from the PDF were refreshed, and Provider, Psychometrist, and Comments were left alone. | No. Clear it by hand, or it goes when the case moves to Finished. |
 | A note on the top-left cell of the Services tab | A problem with the Services table. | Yes, once the table is fixed and the sweep runs again |
+| `Provider Email  (not filled in: 'Dr Patel' isn't in the Contacts tab. ...)` | The name isn't in the `Contacts` tab. Add the person there, or check the spelling. The email cell is left alone. The same for `Psychometrist Email`. |
+| `... 'Dr S' is too short to match. Write the name in full, for example 'Dr Smith')` | A single letter can't be matched. Write the last name in full. |
+| `... 'Doe' could be John Doe, Jane Doe. Write more of the name, for example 'John Doe')` | The name fits more than one person, so none was chosen. Write more of it. |
+| `... the Contacts tab couldn't be used, so emails can't be looked up)` | The tab is missing, empty, or has no `Name` or `Email` column. The tab's own note says which. |
+| `... The old address was cleared)` | The provider or psychometrist changed to someone who couldn't be found, so the previous person's address was removed. |
  
 **What the lines in a Comments note mean**
  
@@ -1058,6 +1101,9 @@ Use your own Dropbox app and your own copy of the sheet while developing. Produc
 - A flagged comment that is deleted entirely, when nothing has been applied to the case, keeps its orange fill and note.
 - A PDF whose case ID can't be read is written to the sheet as a row with a blank Case ID.
 - The screenshot matcher's own limits are listed in its section.
+- A person's last name is matched on its last word, so a name such as `de la Cruz` is matched as `Cruz`. A suffix such as `Jr` would be taken as the last name.
+- Someone listed in the `Contacts` tab by last name only (`Shelton`) matches any first name or initial typed with it.
+- The sweep fills the email columns for a case only while its comment names the provider or psychometrist. Comments are edited and not rewritten, so this holds in practice, but a case whose comment never names one is not filled.
 
 ### Contributing
 
