@@ -153,6 +153,18 @@ def test_when_the_later_of_two_reminders_on_one_day_was_sent_the_earlier_is_not_
     assert plan.to_send == [] and [r.key for _, r in plan.already_sent] == ["DAY_10"]
 
 
+def test_a_log_row_typed_by_hand_in_other_capitals_still_counts_as_sent():
+    plan = plan_for(d(11), [case("111")], sent=[("111", "Day_5")])
+    assert plan.to_send == [] and [(c, r.key) for c, r in plan.already_sent] == [("111", "DAY_5")]
+
+
+def test_a_log_row_with_an_unknown_name_is_shown_in_the_report_and_does_not_hide_a_reminder():
+    book, _ = world([case("111")], sent=[("111", "Day5")])
+    plan = plan_reminders(read_reminder_data(book), d(11))
+    assert [p.reminder.key for p in plan.to_send] == ["DAY_5"]
+    assert "'Day5' isn't a reminder name" in format_report(plan)
+
+
 def test_a_collision_is_reported_with_the_one_that_wins():
     plan = plan_for(d(15), [case("111", "May 7th, 2026 8:00 AM MST")])
     assert [p.reminder.key for p in plan.to_send] == ["DAY_10"]

@@ -191,6 +191,24 @@ def test_log_rows_missing_a_case_or_a_reminder_are_ignored():
     assert read_reminder_data(book).sent == set()
 
 
+@pytest.mark.parametrize("written", ["DAY_5", "Day_5", "day_5", "  day_5  "])
+def test_a_reminder_name_in_the_log_matches_whatever_its_capitals(written):
+    book, _ = sheet(sent=[SENT_HEADERS, ["111", written, "", "", ""]])
+    data = read_reminder_data(book)
+    assert data.sent == {("111", "DAY_5")} and data.notes == []
+
+
+@pytest.mark.parametrize("written", ["Day5", "DAY 5", "Day_55", "check-in"])
+def test_a_name_that_is_not_a_reminder_is_noted_with_its_row_and_not_counted(written):
+    book, _ = sheet(sent=[SENT_HEADERS, ["111", "DAY_1", "", "", ""], ["111", written, "", "", ""]])
+    data = read_reminder_data(book)
+    assert data.sent == {("111", "DAY_1")}
+    assert data.notes == [
+        f"Reminders Sent, row 3: '{written}' isn't a reminder name, so it is ignored. "
+        "Use one of DAY_1, DAY_3, DAY_5, DAY_8, DAY_10, DAY_11_OVERDUE."
+    ]
+
+
 def test_a_header_only_log_has_nothing_sent():
     book, _ = sheet(sent=[SENT_HEADERS])
     data = read_reminder_data(book)

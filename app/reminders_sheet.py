@@ -12,7 +12,8 @@ Google's per-minute request limit, which a call per case would hit quickly):
                   reminders at all, since "in Finished" is what "report submitted"
                   means.
   Reminders Sent  one row per reminder already sent, with at least the columns
-                  Case ID and Reminder (the key, such as DAY_5). It is how a second
+                  Case ID and Reminder (the key, such as DAY_5, in any capitals). A
+                  name that isn't one of the reminders is noted, not guessed at. It is how a second
                   run the same day knows not to send again. A missing tab just
                   means nothing has been sent yet. Later runs that send create it.
 
@@ -32,6 +33,8 @@ kept out of repr() so it can't end up in a log line or a failed test's output.
 from dataclasses import dataclass, field
 
 from gspread.exceptions import WorksheetNotFound
+
+from app.reminder_rules import BY_KEY
 
 
 ONGOING_TAB = "Ongoing"
@@ -154,11 +157,20 @@ def _read_sent(spreadsheet, data):
         "so the reminders can't tell what was already sent. Row 1 of the tab needs "
         "the headers Case ID and Reminder",
     )
-    for row in rows[1:]:
+    for row_number, row in enumerate(rows[1:], start=2):
         case_id = _cell(row, columns[CASE_ID])
-        key = _cell(row, columns[SENT_REMINDER])
-        if case_id and key:
-            data.sent.add((case_id, key))
+        written = _cell(row, columns[SENT_REMINDER])
+        if not case_id or not written:
+            continue
+        key = written.upper()  # people type these by hand: Day_5 means DAY_5
+        if key not in BY_KEY:
+            # Ignoring it would quietly allow a second send, so say so.
+            data.notes.append(
+                f"Reminders Sent, row {row_number}: '{written}' isn't a reminder name, so it "
+                f"is ignored. Use one of {', '.join(BY_KEY)}."
+            )
+            continue
+        data.sent.add((case_id, key))
 
 
 def read_reminder_data(spreadsheet):
