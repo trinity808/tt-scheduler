@@ -151,7 +151,8 @@ def _read_sent(spreadsheet, data):
         return
     columns = _require(
         SENT_TAB, rows[0], [CASE_ID, SENT_REMINDER],
-        "so the reminders can't tell what was already sent",
+        "so the reminders can't tell what was already sent. Row 1 of the tab needs "
+        "the headers Case ID and Reminder",
     )
     for row in rows[1:]:
         case_id = _cell(row, columns[CASE_ID])
