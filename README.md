@@ -54,10 +54,15 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 │   ├── config_loader.py          # Loads config/settings.json
 │   ├── contact_lookup.py         # Matches the names in comments to the people in the Contacts tab
 │   ├── contacts_tab.py           # Loads the Contacts tab, and notes its problems on the tab
+│   ├── exam_date.py              # Reads the exam date out of the Date & Time text
 │   ├── file_utils.py             # Unused, kept from the original project
 │   ├── health_monitor.py         # Logging, startup checks, email alerts
 │   ├── ongoing_row_mapper.py     # Maps an extracted PDF to an Ongoing row, adds or updates it
 │   ├── pdf_extractor.py          # PDF parsing and data extraction
+│   ├── reminder_rules.py         # Dr.'s reminder schedule: when each goes out, and what it says
+│   ├── reminders.py              # python -m app.reminders: previews today's reminders
+│   ├── reminders_report.py       # The reminders report as text
+│   ├── reminders_sheet.py        # Reads the Ongoing, Finished and Reminders Sent tabs
 │   ├── run_lock.py               # A lock file with a stale limit, so two runs can't overlap
 │   ├── schedule_generator.py     # Daily schedule DOCX creation/update
 │   ├── screenshot_matcher.py     # Finds a provider's submitted screenshot in Dropbox and moves the case to Finished
@@ -508,6 +513,62 @@ Names are matched ignoring capitals, accents, punctuation, a leading `Dr`, and m
 - If the provider has just **changed** and the new one can't be found, the old address is cleared, because it now belongs to someone else, and a reminder to the wrong person is worse than none.
 - Problems with the tab itself (a row with no valid address, a name listed twice, a missing column) are noted on its `A1` cell, which clears itself once they are fixed. A missing or unusable `Contacts` tab never stops the sweep.
 - The report says, for each case, whether the email was filled in, by the person's name, and the summary counts them. It never prints an address.
+
+### Reminders: who would be emailed today
+ 
+Dr.'s schedule reminds each provider about the materials and the report for a DDS case.
+**For now the command only previews.** It prints who would be emailed and why, and sends
+nothing and writes nothing to the sheet.
+ 
+| Day | Reminder | Goes out |
+|---|---|---|
+| 1 | Upload behavioral observations and testing materials (target: within 48 hours of the exam) | always |
+| 3 | Materials overdue | only if materials aren't uploaded (not sent yet, see below) |
+| 5 | Midpoint check-in on the report | until the report is in |
+| 8 | Report due in 2 days | until the report is in |
+| 10 | Report due today | until the report is in |
+| 11 | Overdue notice, **director copied** | until the report is in |
+ 
+Day 0 is the date of the exam, and deadlines are calendar days, so the report is due 10
+days after it. Everything goes to the provider. A provider who meets every deadline gets at
+most four reminders.
+ 
+**Weekends.** Nothing is sent on a Saturday or Sunday. Day 8 and Day 10 warn before a
+deadline, so on a weekend they go out the Friday before, and say the due date instead of
+"today". Days 1, 3, 5 and 11 follow something that has already happened, so on a weekend they
+go out the Monday after (Day 11 can't go earlier: nothing is overdue yet). If two reminders
+land on one day, only the later one goes.
+ 
+**What it needs on the sheet**
+ 
+- The Ongoing tab's `Date & Time` (the exam date is read from it, and the time of day is
+  ignored), `Provider` (for the greeting) and `Provider Email`, which the sweep fills in from
+  the Contacts tab. Without the `Provider Email` column the command stops and says so.
+- A `Finished` tab. A case listed there has its report in, and gets no reminders.
+- Optionally a `Reminders Sent` tab, with at least the columns `Case ID` and `Reminder` (such
+  as `DAY_5`). A reminder listed there counts as already sent, so a second run the same day
+  sends nothing new. Without the tab, nothing counts as sent.
+ 
+**Run it after the sweep and the screenshot matcher**, in this order, since the reminders
+use what they leave on the sheet: the sweep fills each case's `Provider Email`, and the
+matcher moves a case to Finished once its report is in. A case whose report is in but hasn't
+been moved yet would still be reminded.
+ 
+```
+python -m app.reminders                      # today's reminders, in Arizona time
+python -m app.reminders --today 2026-11-23   # as if today were that date
+python -m app.reminders --show-text          # also print each email's text
+```
+ 
+`--today` is how to see the schedule for any day, for example for a demo. The report is
+labelled when it was used, so a preview for another day can't be mistaken for today's.
+ 
+The report lists, in this order: the reminders that **would be sent** (with the provider's
+name and the subject, never an address), cases that **need attention** (the exam date can't
+be read, no provider is named, or the provider has no usable address), reminders that are due
+but **not sent** on purpose, with the reason, reminders **already sent**, and a summary. It
+is also logged, in `logs/reminders.log` (and `logs/reminders_error.log` for failures), apart
+from the sweep's and the pipeline's logs.
 
 ### Adding a case
 
@@ -1150,6 +1211,17 @@ Use your own Dropbox app and your own copy of the sheet while developing. Produc
 - A person's last name is matched on its last word, so a name such as `de la Cruz` is matched as `Cruz`. A suffix such as `Jr` would be taken as the last name.
 - Someone listed in the `Contacts` tab by last name only (`Shelton`) matches any first name or initial typed with it.
 - The sweep fills the email columns for a case only while its comment names the provider or psychometrist. Comments are edited and not rewritten, so this holds in practice, but a case whose comment never names one is not filled.
+- The reminders only preview. Nothing is sent yet, and nothing records what was sent, so the
+  `Reminders Sent` tab has to be filled in by hand for now.
+- Each reminder goes out on its own day only. Runs are manual, so a day with no run loses
+  that day's reminder, and the report doesn't yet say what was missed.
+- The Day 3 reminder is never sent: it goes only if materials aren't uploaded, and nothing
+  tracks that yet. It is listed in the report as held back. Day 1 is sent regardless.
+- "The report is in" means the case is in Finished. A report that has been submitted but whose
+  screenshot hasn't been matched yet looks unsubmitted, so that provider is still reminded.
+- Only providers are reminded (phase 1). A case where a practicum student took part is reminded
+  through the provider named on the case.
+- An exam date that can't be read from `Date & Time` is reported on every run until it is fixed.
 
 ### Contributing
 
