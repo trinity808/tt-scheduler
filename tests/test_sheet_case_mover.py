@@ -342,13 +342,34 @@ def test_a_value_someone_entered_is_kept_when_the_move_has_nothing_for_that_colu
     assert case_ids_in(ongoing) == []
 
 
+class FinishedThatParsesCellWrites(FakeWorksheet):
+    """
+    In real Sheets, update_cell() makes Google read the value as if it were typed
+    into the cell: "11/12/2026 01:00 PM" becomes a date shown as "11/12/2026 1:00 PM",
+    and "484.00" becomes the number 484. update() stores the text as given, which is
+    what a new row gets. A fake can't imitate the parsing, so this refuses update_cell().
+    """
+
+    def update_cell(self, row, col, value):
+        raise AssertionError("update_cell() parses the value as typed input; use update()")
+
+
+def test_a_blank_cell_is_filled_with_a_write_that_stores_the_text_as_given():
+    ongoing = FakeWorksheet([ONGOING_HEADERS, ongoing_row("111")])
+    finished = FinishedThatParsesCellWrites([FINISHED_HEADERS, existing_row_for_111()])
+    move_case_to_finished(
+        ongoing, finished, "111", extra_fields={"Date Completed": "11/12/2026 01:00 PM"}
+    )
+    assert finished.value(2, "Date Completed") == "11/12/2026 01:00 PM"
+
+
 def test_the_fill_happens_before_the_case_leaves_ongoing():
     steps = []
 
     class RecordingFinished(FakeWorksheet):
-        def update_cell(self, row, col, value):
+        def update(self, range_name, values):
             steps.append("fill")
-            super().update_cell(row, col, value)
+            super().update(range_name, values)
 
     class RecordingOngoing(FakeWorksheet):
         def delete_rows(self, start_index, end_index=None):

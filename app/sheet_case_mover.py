@@ -130,7 +130,14 @@ def _complete_an_interrupted_move(
         )
  
     for idx in blanks:
-        finished_ws.update_cell(row_number, idx + 1, new_row[idx])
+        # update(), not update_cell(): update_cell() makes Google read the value as if it
+        # were typed into the cell, so "11/12/2026 01:00 PM" becomes a date shown as
+        # "11/12/2026 1:00 PM" and "484.00" becomes the number 484. update() stores the
+        # text as given, as the write of a new row does.
+        finished_ws.update(
+            range_name=rowcol_to_a1(row_number, idx + 1),
+            values=[[new_row[idx]]],
+        )
  
     filled = f" Filled in: {', '.join(headers[i] for i in blanks)}." if blanks else ""
     logger.warning(
