@@ -22,8 +22,9 @@ Services tab, scenario 1 (previewed, applied, applied again), scenarios 2 and 3,
 which edit the comment and sweep again, scenarios 4, 5 and 10, which are about
 flags and refusals, scenarios 11 to 14, where the stored original is missing or
 belongs to another row, scenarios 6 to 9, where a comment is rewritten or cleared
-or a line is typed into the cell, and scenarios 15 and 16, where rows move and a
-case goes to Finished. Each batch shares sweeps, on a row each.
+or a line is typed into the cell, scenarios 15 and 16, where rows move and a case
+goes to Finished, and scenario 19, where a move is interrupted and run again.
+Each batch shares sweeps, on a row each.
 
 Run from the project root:
     python -m scripts.check_sweep_live                 everything
@@ -398,6 +399,40 @@ def read_log(work_folder):
     return open(path, encoding="utf-8").read() if os.path.exists(path) else ""
 
 
+
+
+class FailsToDelete:
+    """
+    A worksheet whose delete always fails, and which otherwise is the worksheet it
+    wraps. Handed to the mover, it interrupts a move after the case has been written
+    to Finished and before it leaves Ongoing, which is the state a retry has to handle.
+    """
+
+    def __init__(self, worksheet):
+        self._worksheet = worksheet
+
+    def __getattr__(self, name):
+        return getattr(self._worksheet, name)
+
+    def delete_rows(self, *args, **kwargs):
+        raise RuntimeError("API error")
+
+
+class LogCatcher(logging.Handler):
+    """Keeps the warnings that one logger emits, until it is closed."""
+
+    def __init__(self, logger_name):
+        super().__init__(logging.WARNING)
+        self.messages = []
+        self._logger = logging.getLogger(logger_name)
+        self._logger.addHandler(self)
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+    def close(self):
+        self._logger.removeHandler(self)
+        super().close()
 
 
 def build_env(sh, created, services_ws, work):
@@ -1208,6 +1243,131 @@ def check_moves(env):
     moved_checks("after the move", report, state, remaining)
 
 
+def check_interrupted_moves(env):
+    """Scenario 19: a move interrupted after its write can be run again, and refuses when Finished disagrees."""
+    sh, created, services_ws, work = env.sh, env.created, env.services_ws, env.work
+    lock_path, plain = env.lock_path, env.plain
+    ws = make_ongoing_tab(sh, created, PREFIX + "Ongoing 6")
+    finished_ws = make_tab(sh, created, PREFIX + "Finished 2", FINISHED_HEADERS)
+    stand_in = ScratchSpreadsheet({ONGOING_TAB: ws, SERVICES_TAB: services_ws})
+    client = SheetsMetadataClient(ws)
+
+    print("Scenario 19: a move interrupted after it writes to Finished, and run again")
+    ids = ["S19A", "S19B", "S19C", "S19D"]
+    date_completed = "11/12/2026 01:00 PM"
+    extras = {"Date Completed": date_completed}
+    date_column = FINISHED_HEADERS.index("Date Completed")
+    ws.update(range_name=f"A2:{rowcol_to_a1(1 + len(ids), len(ONGOING_HEADERS))}",
+              values=[[cid, "John Doe", "Dr. Doe", "J. Smith", plain, "484.00", "Add: cars"] for cid in ids])
+    for row, cid in enumerate(ids, start=2):
+        set_case_tests(client, row, cid, ORIGINAL_TESTS)
+
+    def row_at(table, number):
+        """A Finished row, padded to the headers: Sheets can return a row short when its last cells are blank."""
+        row = list(table[number - 1]) if 0 < number <= len(table) else []
+        return row + [""] * (len(FINISHED_HEADERS) - len(row))
+
+    def in_finished(table, cid):
+        return [n for n, row in enumerate(table, start=1) if n > 1 and row and row[0].strip() == cid]
+
+    def finished_row(cid, price="484.00"):
+        return [cid, "John Doe", "Dr. Doe", "J. Smith", price, "", ""]
+
+    def stored_ids():
+        return [cid for cid, _ in stored_with_ids(client).values()]
+
+    def try_move(ongoing, finished, cid):
+        """Runs the real mover. Returns (the row it returns, None) or (None, the error it raises)."""
+        try:
+            return move_case_to_finished(ongoing, finished, cid, extra_fields=extras), None
+        except Exception as error:      # what it raised is what a check looks at
+            return None, error
+
+    check("the four cases are in Ongoing, each with its original stored",
+          set(rows_by_id(ws.get_all_values())) == set(ids) and sorted(stored_ids()) == sorted(ids),
+          f"stored {stored_ids()}")
+
+    print("  -- S19A: interrupted after the write, then run again")
+    _, error = try_move(FailsToDelete(ws), finished_ws, "S19A")
+    finished = finished_ws.get_all_values()
+    check("S19A: the first attempt fails at the delete, as arranged",
+          isinstance(error, RuntimeError) and "API error" in str(error), f"got {error!r}")
+    check("S19A: it is in Finished once, with its Date Completed",
+          in_finished(finished, "S19A") == [2] and row_at(finished, 2)[date_column] == date_completed,
+          f"got {finished[1:]}")
+    check("S19A: it is still in Ongoing, with its original stored",
+          "S19A" in rows_by_id(ws.get_all_values()) and "S19A" in stored_ids())
+
+    warnings = LogCatcher("app.sheet_case_mover")
+    try:
+        returned, error = try_move(ws, finished_ws, "S19A")
+    finally:
+        warnings.close()
+    finished = finished_ws.get_all_values()
+    check("S19A, run again: it returns the row it was already on", returned == 2,
+          f"got {returned}, error {error!r}")
+    check("S19A, run again: it is in Finished once, not twice", in_finished(finished, "S19A") == [2],
+          f"got {in_finished(finished, 'S19A')}")
+    check("S19A, run again: it has left Ongoing, and its original went with its row",
+          "S19A" not in rows_by_id(ws.get_all_values()) and "S19A" not in stored_ids())
+    check("S19A, run again: it says it completed an interrupted move",
+          any("was already in Finished (row 2), so no row was added" in m for m in warnings.messages),
+          f"warnings: {warnings.messages}")
+
+    print("  -- S19B: a Finished row with a blank Date Completed is filled in, and nothing else is touched")
+    finished_ws.update(range_name="A3:G3", values=[finished_row("S19B")])
+    before = row_at(finished_ws.get_all_values(), 3)
+    warnings = LogCatcher("app.sheet_case_mover")
+    try:
+        returned, error = try_move(ws, finished_ws, "S19B")
+    finally:
+        warnings.close()
+    after = finished_ws.get_all_values()
+    check("S19B: it returns the row it was on", returned == 3, f"got {returned}, error {error!r}")
+    check("S19B: the blank Date Completed is filled in", row_at(after, 3)[date_column] == date_completed,
+          f"got {row_at(after, 3)}")
+    check("S19B: no other cell of that row changed",
+          all(row_at(after, 3)[i] == before[i] for i in range(len(FINISHED_HEADERS)) if i != date_column))
+    check("S19B: it has left Ongoing, and is in Finished once",
+          "S19B" not in rows_by_id(ws.get_all_values()) and in_finished(after, "S19B") == [3])
+    check("S19B: the warning says what was filled in",
+          any("Filled in: Date Completed." in m for m in warnings.messages), f"warnings: {warnings.messages}")
+
+    print("  -- S19C: a Finished row that disagrees makes it refuse, and change nothing")
+    finished_ws.update(range_name="A4:G4", values=[finished_row("S19C", price="250.00")])
+    finished_before, ongoing_before = finished_ws.get_all_values(), ws.get_all_values()
+    _, error = try_move(ws, finished_ws, "S19C")
+    refusal = str(error) if isinstance(error, ValueError) else None
+    check("S19C: it refuses, naming the Price", refusal is not None and "different values for: Price" in refusal,
+          f"got {refusal!r}")
+    check("S19C: Finished is unchanged", finished_ws.get_all_values() == finished_before)
+    check("S19C: it is still in Ongoing, unchanged, with its original stored",
+          ws.get_all_values() == ongoing_before and "S19C" in stored_ids())
+
+    print("  -- S19D: a case in Finished twice makes it refuse, and change nothing")
+    finished_ws.update(range_name="A5:G6", values=[finished_row("S19D"), finished_row("S19D")])
+    finished_before, ongoing_before = finished_ws.get_all_values(), ws.get_all_values()
+    _, error = try_move(ws, finished_ws, "S19D")
+    refusal = str(error) if isinstance(error, ValueError) else None
+    check("S19D: it refuses, naming the rows", refusal is not None and "appears 2 times in Finished (rows 5, 6)" in refusal,
+          f"got {refusal!r}")
+    check("S19D: Finished is unchanged", finished_ws.get_all_values() == finished_before)
+    check("S19D: it is still in Ongoing, unchanged, with its original stored",
+          ws.get_all_values() == ongoing_before and "S19D" in stored_ids())
+
+    print("  -- a sweep afterwards")
+    report = apply_live(stand_in, work)
+    state = look_at_moved(ws, client)
+    check("the cases that were moved are not in the report",
+          "S19A" not in report and "S19B" not in report, report[:400])
+    check("the two that were refused are still swept as usual",
+          all("add 96130-CARS-2" in case_block(report, c) for c in ("S19C", "S19D")), report[:500])
+    check("their stored originals are on their own rows",
+          all(state["stored"].get(state["where"].get(c)) == (c, ORIGINAL_TESTS) for c in ("S19C", "S19D")),
+          f"got {state['stored']}, cases at {state['where']}")
+    check("the lock was given back", not os.path.exists(lock_path))
+
+
 # The scenarios share sweeps, so they run in groups: (name, the scenarios in it, its function).
 GROUPS = [
     ("chain", (1, 2, 3), check_chain),
@@ -1215,6 +1375,7 @@ GROUPS = [
     ("nothing-stored", (11, 12, 13, 14), check_nothing_stored),
     ("rewrites", (6, 7, 8, 9), check_rewrites),
     ("moves", (15, 16), check_moves),
+    ("interrupted-move", (19,), check_interrupted_moves),
 ]
 
 
