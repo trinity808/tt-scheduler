@@ -5,12 +5,13 @@ Kept apart from the planning so the wording can be tested without capturing
 console output: format_report() takes a RunPlan and returns a string.
 
 Order: a banner saying what kind of run it was, the reminders that would go out (or,
-after a live test, those that were sent or failed), anything needing attention,
-reminders held back, reminders already sent, notes about the sheet, then a summary.
-Email addresses never appear, only names.
+after a live run, those that were sent, failed, or weren't attempted), anything
+needing attention, reminders held back, reminders already sent, notes about the
+sheet, then a summary. Email addresses never appear, only names.
 
-Two kinds of run, each with its own banner: a preview (nothing sent, nothing written)
-and a live test (everything sent to the test address).
+Three kinds of run, each with its own banner: a preview (nothing sent, nothing
+written), a live run (sent to the providers and logged), and a live test (everything
+sent to the test address, nothing logged).
 
 The numbers in the summary come from summary_counts(), so the log line can use
 the same numbers and never disagree with the report.
@@ -34,6 +35,7 @@ class SummaryCounts:
     nothing_due: int
     sent: int = 0
     failed: int = 0
+    not_attempted: int = 0
 
 
 def summary_counts(plan, result=None):
@@ -47,6 +49,7 @@ def summary_counts(plan, result=None):
         nothing_due=plan.nothing_due,
         sent=len(result.sent) if result else 0,
         failed=len(result.failed) if result else 0,
+        not_attempted=len(result.not_attempted) if result else 0,
     )
 
 
@@ -57,6 +60,7 @@ def _who(planned):
 
 BANNERS = {
     "preview": "PREVIEW: nothing was sent, and nothing was written to the sheet.",
+    "live": "LIVE: the reminders below were sent to the providers and written to the Reminders Sent tab.",
     "live test": (
         "LIVE TEST: every email went to the test address, marked [TEST]. "
         "Nothing was written to the Reminders Sent tab."
@@ -77,7 +81,7 @@ def _reminder_lines(planned, show_text, copied=True):
 
 
 def _delivery_lines(result, show_text, mode):
-    """What a live test did, in place of the preview's "Would send"."""
+    """What a live run did, in place of the preview's "Would send"."""
     lines = []
     if result.sent:
         lines.append(f"Sent ({len(result.sent)}):")
@@ -94,13 +98,23 @@ def _delivery_lines(result, show_text, mode):
             for planned, reason in result.failed
         ]
         lines.append("")
+
+    if result.log_problem:
+        lines += [f"STOPPED: {result.log_problem}", ""]
+    if result.not_attempted:
+        lines.append(f"Not attempted ({len(result.not_attempted)}):")
+        lines += [
+            f"  - Case {planned.case.case_id}: {planned.reminder.label} {_who(planned)}"
+            for planned in result.not_attempted
+        ]
+        lines.append("")
     return lines
 
 
 def format_report(plan, show_text=False, today_given=False, result=None, mode="preview"):
     """
-    The report. `result` is a SendResult after a live test, and `mode` is "preview" or
-    "live test" (see BANNERS). A preview takes neither.
+    The report. `result` is a SendResult after a live run, and `mode` is "preview",
+    "live" or "live test" (see BANNERS). A preview takes neither.
     """
     lines = [
         f"Reminders for {_long_date(plan.today)} (Arizona time)"
@@ -164,10 +178,12 @@ def format_report(plan, show_text=False, today_given=False, result=None, mode="p
 
 
 def _outcome(counts):
-    """Words like "3 reminder(s) sent, 1 failed", for after a live test."""
+    """"3 reminder(s) sent, 1 failed" after a live run."""
     text = f"{counts.sent} reminder(s) sent"
     if counts.failed:
         text += f", {counts.failed} failed"
+    if counts.not_attempted:
+        text += f", {counts.not_attempted} not attempted"
     return text
 
 

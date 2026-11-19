@@ -86,7 +86,12 @@ MATERIALS_UNKNOWN = "materials status isn't tracked yet, so it isn't sent"
 
 def arizona_today(now=None):
     """Today's date in Arizona. `now` is for tests."""
-    return (now or datetime.now(timezone.utc)).astimezone(ARIZONA).date()
+    return arizona_now(now).date()
+
+
+def arizona_now(now=None):
+    """The current moment in Arizona, as a datetime. `now` is for tests."""
+    return (now or datetime.now(timezone.utc)).astimezone(ARIZONA)
 
 
 def due_date(exam_date, reminder):
