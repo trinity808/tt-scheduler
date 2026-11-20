@@ -1,5 +1,11 @@
 # Secrets
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
 
 # Planning doc — living/in-progress, not tracked system state
 scope.pdf
@@ -7,6 +13,7 @@ scope.pdf
 # Runtime lock file (created/removed by main.py on every run)
 scheduler.lock
 sweep.lock
+reminders.lock
 
 # Legacy dedup state file — state_manager.py is currently unused,
 # but never commit this if it starts getting created again
