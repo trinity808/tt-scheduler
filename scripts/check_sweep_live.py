@@ -78,7 +78,7 @@ FINISHED_HEADERS = [
 # The scratch Services tab. Fixed, so that what the sweep resolves never
 # depends on what the sandbox's own Services tab holds. Names are made up, so
 # a line in a cell can only have come from this table.
-SERVICES_HEADERS = ["Code", "Aliases", "Name"]
+SERVICES_HEADERS = ["Code", "Aliases", "Name", "Price"]
 SERVICES = [
     ["96101-WISC-V", "WISC", "Scratch name for WISC-V"],
     ["90791", "Psychiatric Exam", "Scratch name for 90791"],

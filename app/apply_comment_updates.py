@@ -110,7 +110,12 @@ from app.run_lock import LockHeld, acquire, describe, minutes_from_config, relea
 from app.services_cell import parse_services_cell
 from app.services_tab import ServicesTab, flag_services_tab, load_services_tab
 from app.services_update import build_final_services
-from app.sheet_client import get_header_map, update_case_field
+from app.sheet_client import (
+    get_header_map,
+    update_case_field,
+    load_service_prices,
+    calculate_service_price,
+)
 
 
 ONGOING_TAB = "Ongoing"
@@ -338,6 +343,11 @@ def apply_comment_updates(worksheet, lookup=None, metadata=None, dry_run=False, 
     applying = metadata is not None and services_idx is not None
     stored = read_all_case_tests(metadata) if applying else None
 
+        # Load service prices once for the entire sweep.
+    prices = load_service_prices(
+        worksheet.spreadsheet.worksheet("Services")
+    )
+    
     results = []
 
     for row_number, row in enumerate(all_values[1:], start=2):
@@ -406,6 +416,27 @@ def apply_comment_updates(worksheet, lookup=None, metadata=None, dry_run=False, 
                 cell_text, lookup, metadata, stored, dry_run,
             )
             flags += services_flags
+                # Calculate price from the final requested services.
+        if services["status"] in ("updated", "unchanged"):
+            try:
+                service_update = services.get("update")
+
+                if service_update is not None:
+                    final_services_text = service_update.text
+                else:
+                    final_services_text = cell_text
+
+                total = calculate_service_price(
+                    final_services_text, prices
+                )
+
+                if not dry_run:
+                    update_case_field(
+                        worksheet, row_number, "Price", float(total)
+                    )
+
+            except (ValueError, KeyError) as exc:
+                flags.append(f"Price calculation skipped: {exc}")
 
         if not dry_run:
             comments_cell = rowcol_to_a1(row_number, header_map["Comments"])

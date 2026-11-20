@@ -10,6 +10,8 @@ Design notes:
 """
 
 import os
+import re
+from decimal import Decimal, InvalidOperation
 from dotenv import load_dotenv
 import gspread
 
@@ -72,6 +74,80 @@ def update_case_field(worksheet, row_number, field_name, value):
 
     worksheet.update_cell(row_number, header_map[field_name], value)
 
+def load_service_prices(services_worksheet):
+    """Load service codes and prices from the pricing worksheet."""
+    records = services_worksheet.get_all_records()
+    prices = {}
+
+    for record in records:
+        code = str(record.get("Code", "")).strip().upper()
+        raw_price = str(record.get("Price", "")).strip()
+
+        if not code:
+            continue
+
+        if code in prices:
+            raise ValueError(f"Duplicate pricing code: {code}")
+        if not raw_price:
+            print(f"WARNING: No price configured for {code}")
+            continue
+
+        try:
+            prices[code] = Decimal(
+                raw_price.replace("$", "").replace(",", "")
+            )
+        except InvalidOperation:
+            raise ValueError(
+                f"Invalid price for service {code}: {raw_price}"
+            )
+
+    return prices
+
+
+def calculate_service_price(services_requested, prices):
+    """Calculate the total price of all requested services."""
+    service_codes = re.findall(
+        r"(?m)^\s*\d+\.\s*([A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)\s+-\s+",
+        services_requested or "",
+    )
+
+    if not service_codes:
+        raise ValueError("No service codes found in Services Requested")
+
+    total = Decimal("0")
+    missing_codes = []
+
+    for code in service_codes:
+        code = code.upper()
+
+        if code not in prices:
+            missing_codes.append(code)
+        else:
+            total += prices[code]
+
+    if missing_codes:
+        raise ValueError(
+            "Missing prices for: " + ", ".join(missing_codes)
+        )
+
+    return total
+
+
+def update_case_price(worksheet, row_number, prices):
+    """Recalculate and update a case's Price field."""
+    headers = get_header_map(worksheet)
+
+    services = worksheet.cell(
+        row_number, headers["Services Requested"]
+    ).value
+
+    total = calculate_service_price(services, prices)
+
+    update_case_field(
+        worksheet, row_number, "Price", float(total)
+    )
+
+    return total
 
 if __name__ == "__main__":
     sh = get_client()
