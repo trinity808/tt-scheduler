@@ -57,11 +57,14 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 │   ├── exam_date.py              # Reads the exam date out of the Date & Time text
 │   ├── file_utils.py             # Unused, kept from the original project
 │   ├── health_monitor.py         # Logging, startup checks, email alerts
+│   ├── mail_sender.py            # Microsoft Graph: sign in and send one email
 │   ├── ongoing_row_mapper.py     # Maps an extracted PDF to an Ongoing row, adds or updates it
 │   ├── pdf_extractor.py          # PDF parsing and data extraction
 │   ├── reminder_rules.py         # Dr.'s reminder schedule: when each goes out, and what it says
-│   ├── reminders.py              # python -m app.reminders: previews today's reminders
+│   ├── reminders.py              # python -m app.reminders: previews today's reminders, or sends them (--live)
 │   ├── reminders_report.py       # The reminders report as text
+│   ├── reminders_send.py         # Sends the planned reminders one at a time and logs each
+│   ├── reminders_sent_log.py     # Writes the Reminders Sent tab
 │   ├── reminders_sheet.py        # Reads the Ongoing, Finished and Reminders Sent tabs
 │   ├── run_lock.py               # A lock file with a stale limit, so two runs can't overlap
 │   ├── schedule_generator.py     # Daily schedule DOCX creation/update
@@ -220,6 +223,56 @@ python get_refresh_token.py
 8. Copy the printed `DROPBOX_REFRESH_TOKEN=...` value into `.env`.
 9. In Dropbox, create the three folders the pipeline uses (for example `incoming_pdfs`, `processed_pdfs`, and `schedules`), inside `Apps/<your app name>/` for an app-folder app. Set the three folder variables in `.env` to match, following the path rules above.
 
+## Microsoft Graph Setup
+ 
+The reminders are sent through Microsoft Graph (`sendMail`), as the support mailbox, by an
+app registered in Microsoft Entra ID. No one signs in when it runs: the app signs in with its
+own client secret and sends as the mailbox. Nothing here is needed to preview.
+ 
+**Settings** in `.env` (names only, see `.env.example`; never commit values):
+ 
+| Setting | What it is |
+|---|---|
+| `MICROSOFT_TENANT_ID` | The Microsoft 365 tenant (directory) the app is registered in |
+| `MICROSOFT_CLIENT_ID` | The app registration's application (client) ID |
+| `MICROSOFT_CLIENT_SECRET` | The app's client secret. Expires, see below |
+| `MICROSOFT_SENDER_EMAIL` | The mailbox the emails are sent from |
+| `STAFF_CC_EMAILS` | Copied on the Day 11 overdue notice (the Director), comma-separated |
+| `REMINDERS_TEST_RECIPIENT` | Where `--live --test` sends everything |
+| `REMINDERS_GO_LIVE` | `true` switches on sending to the providers. Keep it off until Dr. has approved the emails |
+ 
+The app needs the **Mail.Send** permission, as an *application* permission, with admin
+consent given for the tenant. It signs in to `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token`
+asking for `https://graph.microsoft.com/.default`.
+ 
+**Who has what.** To be filled in:
+ 
+| | |
+|---|---|
+| App registration (name, and who owns it) | TBA |
+| Client secret expires on | TBA |
+| Admin consent for Mail.Send given by | TBA |
+| Sending mailbox | the account in `MICROSOFT_SENDER_EMAIL` (expected to be the support account; TBA) |
+| Support account sign-in | 2-step verification is on Dr.'s phone |
+ 
+**The secret expires.** When it does, every send fails at sign-in, with nothing sent and an
+alert (`Microsoft sign-in failed`, usually `invalid_client`). Put a reminder in a calendar a
+month before the date above. To replace it:
+ 
+1. In the Microsoft Entra admin center, open the app registration, then Certificates &
+   secrets, and choose New client secret.
+2. Copy the secret's **Value** at once. It is shown only once.
+3. Put it in `MICROSOFT_CLIENT_SECRET` in `.env` on every computer that runs the reminders.
+4. Check it with `python -m app.reminders --live --test`.
+5. Only then delete the old secret, and update the date above.
+ 
+**Known limit.** Mail.Send as an application permission lets the app send as any mailbox in
+the tenant, not only the support one. Limiting it to one mailbox needs a tenant administrator
+(an application access policy in Exchange Online) and is still to do.
+ 
+**Trying it.** `python -m app.reminders --live --test` sends every due reminder to
+`REMINDERS_TEST_RECIPIENT`, marked `[TEST]`, and records nothing, so it can be repeated.
+
 ## Configuration
 
 Settings are split in two, by one rule: anything that is the same for everyone lives in `config/settings.json`, which is committed. Anything that differs between machines or people lives in `.env`, which is not. That's why Dropbox folder paths (including the screenshot matcher's year folder), credentials, and the sheet ID are in `.env`(see [Setup](#setup)).
@@ -249,6 +302,7 @@ Settings:
 - `adult_age_cutoff`: age used to choose the adult or child report template.
 - `max_files_per_run`: maximum number of PDFs to process in one scheduler run.
 - `sweep_lock_stale_minutes`: how old, in minutes, a sweep's lock must be before the next live sweep assumes its owner died and takes it over. 15 if missing. Must be a positive number, or 15 is used and a warning is logged. See [Running the sweep](#running-the-sweep).
+- `reminders_lock_stale_minutes`: the same, for the reminders' own `reminders.lock`: how old, in minutes, that lock must be before the next live reminders run assumes its owner died and takes it over. Optional, and not in the file by default. 15 if missing. Must be a positive number, or 15 is used and a warning is logged. See [Reminders](#reminders-who-is-emailed-today).
 - `adult_template_path`: path to the adult DOCX template.
 - `child_template_path`: path to the child DOCX template.
 - `generated_docs_folder`: local folder for filled report documents.
@@ -514,11 +568,12 @@ Names are matched ignoring capitals, accents, punctuation, a leading `Dr`, and m
 - Problems with the tab itself (a row with no valid address, a name listed twice, a missing column) are noted on its `A1` cell, which clears itself once they are fixed. A missing or unusable `Contacts` tab never stops the sweep.
 - The report says, for each case, whether the email was filled in, by the person's name, and the summary counts them. It never prints an address.
 
-### Reminders: who would be emailed today
+### Reminders: who is emailed today
  
 Dr.'s schedule reminds each provider about the materials and the report for a DDS case.
-**For now the command only previews.** It prints who would be emailed and why, and sends
-nothing and writes nothing to the sheet.
+The command **previews by default**: it prints who would be emailed and why, and sends
+nothing and writes nothing to the sheet. With `--live` it sends the emails, and records each
+one in the `Reminders Sent` tab.
  
 | Day | Reminder | Goes out |
 |---|---|---|
@@ -545,30 +600,74 @@ land on one day, only the later one goes.
   ignored), `Provider` (for the greeting) and `Provider Email`, which the sweep fills in from
   the Contacts tab. Without the `Provider Email` column the command stops and says so.
 - A `Finished` tab. A case listed there has its report in, and gets no reminders.
-- Optionally a `Reminders Sent` tab, with at least the columns `Case ID` and `Reminder` (such
-  as `DAY_5`). A reminder listed there counts as already sent, so a second run the same day
-  sends nothing new. Without the tab, nothing counts as sent.
+- A `Reminders Sent` tab. The command creates it the first time it sends, with the columns
+  `Case ID`, `Reminder` (such as `DAY_5`), `Recipient` (the provider's name, never an
+  address), `Sent On` and `Sent At` (Arizona time). A reminder listed there counts as already
+  sent, so a second run the same day sends nothing new. A row added by hand only needs `Case
+  ID` and `Reminder`. Without the tab, nothing counts as sent.
  
 **Run it after the sweep and the screenshot matcher**, in this order, since the reminders
 use what they leave on the sheet: the sweep fills each case's `Provider Email`, and the
 matcher moves a case to Finished once its report is in. A case whose report is in but hasn't
 been moved yet would still be reminded.
  
+**Ways to run it**
+ 
 ```
-python -m app.reminders                      # today's reminders, in Arizona time
-python -m app.reminders --today 2026-11-23   # as if today were that date
+python -m app.reminders                      # preview today's reminders (Arizona time)
+python -m app.reminders --today 2026-11-23   # preview as if today were that date
 python -m app.reminders --show-text          # also print each email's text
+python -m app.reminders --live --test        # send them ALL to the test address
+python -m app.reminders --live               # send them to the providers
 ```
  
-`--today` is how to see the schedule for any day, for example for a demo. The report is
-labelled when it was used, so a preview for another day can't be mistaken for today's.
+Add `--pause` to wait for Enter at the end, for a double-clicked shortcut.
  
-The report lists, in this order: the reminders that **would be sent** (with the provider's
-name and the subject, never an address), cases that **need attention** (the exam date can't
-be read, no provider is named, or the provider has no usable address), reminders that are due
-but **not sent** on purpose, with the reason, reminders **already sent**, and a summary. It
-is also logged, in `logs/reminders.log` (and `logs/reminders_error.log` for failures), apart
-from the sweep's and the pipeline's logs.
+| | Emails go to | Writes `Reminders Sent` | Needs |
+|---|---|---|---|
+| Preview | nobody | no | nothing |
+| `--live --test` | `REMINDERS_TEST_RECIPIENT`, marked `[TEST]`, nobody copied | no, so a real run afterwards still sends | the four Microsoft settings and `REMINDERS_TEST_RECIPIENT` in `.env` |
+| `--live` | the providers (Day 11 also copies `STAFF_CC_EMAILS`) | yes, one row after each accepted email | the four Microsoft settings, `REMINDERS_GO_LIVE=true` and a valid `STAFF_CC_EMAILS` in `.env`, and no `--today` |
+ 
+**`--live` alone does not email a provider.** Real sending is switched off until
+`REMINDERS_GO_LIVE=true` is in `.env`. Leave it off until Dr. has approved the wording of the
+emails, and try everything with `--live --test` first. `--today` works on a preview and with
+`--test`, but not on a real send, which could only email providers as if it were another
+day. A run that finds any of these unmet refuses to start, says why before it touches the
+sheet, and exits with code 2. See [Microsoft Graph Setup](#microsoft-graph-setup) for the
+settings.
+ 
+The overdue notice must copy the Director. If `STAFF_CC_EMAILS` is empty it is listed under
+"needs attention" and not sent, and the other reminders still go.
+ 
+**While it sends.** Emails go one at a time, and it signs in to Microsoft once. With nothing
+to send it doesn't sign in, and doesn't create the `Reminders Sent` tab. A row is written as
+soon as Microsoft accepts an email. ("Accepted" is Microsoft's `202`: the email is on its
+way, not proof it was delivered.)
+ 
+- **A send fails.** It is listed under "Failed to send", not recorded, and the other
+  reminders still go. Run the command again the same day and it is tried again. The run
+  exits with code 1 and sends the usual alert email.
+- **A row can't be written.** The run stops at once, so it can't send something it has no
+  record of. The report says `STOPPED`, lists what it didn't attempt, and names the case and
+  reminder to add to the `Reminders Sent` tab by hand. Without that row the next run would
+  send it again.
+ 
+**Two runs at once.** A live run takes `reminders.lock` in the folder it runs from. A second
+live run started while it is going does nothing and says so. A lock older than 15 minutes is
+taken over, and the limit can be changed with `reminders_lock_stale_minutes` in
+`config/settings.json`. A preview takes no lock. The lock only covers one computer, so run
+the reminders from one.
+ 
+The report is headed `PREVIEW`, `LIVE` or `LIVE TEST`, so the kind of run can't be mistaken.
+It lists, in this order: the reminders that were sent (or, in a preview, **would be sent**),
+with the provider's name and the subject, never an address; any that **failed to send**, and
+the `STOPPED` notice and what **wasn't attempted**; cases that **need attention** (the exam
+date can't be read, no provider is named, the provider has no usable address, or there is
+no Director address to copy); reminders due but **not sent** on purpose, with the reason;
+reminders **already sent**; and a summary. It is also logged, in `logs/reminders.log` (and
+`logs/reminders_error.log` for failures), apart from the sweep's and the pipeline's logs.
+No address, secret or sign-in token is ever printed or logged.
 
 ### Adding a case
 
@@ -1211,16 +1310,17 @@ Use your own Dropbox app and your own copy of the sheet while developing. Produc
 - A person's last name is matched on its last word, so a name such as `de la Cruz` is matched as `Cruz`. A suffix such as `Jr` would be taken as the last name.
 - Someone listed in the `Contacts` tab by last name only (`Shelton`) matches any first name or initial typed with it.
 - The sweep fills the email columns for a case only while its comment names the provider or psychometrist. Comments are edited and not rewritten, so this holds in practice, but a case whose comment never names one is not filled.
-- The reminders only preview. Nothing is sent yet, and nothing records what was sent, so the
-  `Reminders Sent` tab has to be filled in by hand for now.
-- Each reminder goes out on its own day only. Runs are manual, so a day with no run loses
-  that day's reminder, and the report doesn't yet say what was missed.
-- The Day 3 reminder is never sent: it goes only if materials aren't uploaded, and nothing
-  tracks that yet. It is listed in the report as held back. Day 1 is sent regardless.
-- "The report is in" means the case is in Finished. A report that has been submitted but whose
-  screenshot hasn't been matched yet looks unsubmitted, so that provider is still reminded.
-- Only providers are reminded (phase 1). A case where a practicum student took part is reminded
-  through the provider named on the case.
+- Sending to the providers is built but switched off (`REMINDERS_GO_LIVE`) until Dr. has approved the wording of the six emails.
+- A failed send is tried again only if the command is run again that day. The next day that reminder has passed, like a missed run (next bullet).
+- The lock that stops two runs at once covers one computer. Run the reminders from one.
+- If a row can't be written to `Reminders Sent`, the run stops and the row has to be added by
+  hand, or the next run sends that reminder again.
+- Microsoft accepting an email isn't proof it arrived. Bounces and undelivered emails aren't detected.
+- The Microsoft client secret expires (date: TBA, see Microsoft Graph Setup), and Mail.Send isn't yet limited to the one mailbox.
+- Each reminder goes out on its own day only. Runs are manual, so a day with no run loses that day's reminder, and the report doesn't yet say what was missed.
+- The Day 3 reminder is never sent: it goes only if materials aren't uploaded, and nothing tracks that yet. It is listed in the report as held back. Day 1 is sent regardless.
+- "The report is in" means the case is in Finished. A report that has been submitted but whose screenshot hasn't been matched yet looks unsubmitted, so that provider is still reminded.
+- Only providers are reminded (phase 1). A case where a practicum student took part is reminded through the provider named on the case.
 - An exam date that can't be read from `Date & Time` is reported on every run until it is fixed.
 
 ### Contributing
