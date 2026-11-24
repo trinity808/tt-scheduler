@@ -702,3 +702,201 @@ def test_run_reminders_hands_back_an_exception_the_command_raises(tmp_path):
     env = live.build_env(REAL_ENV, people())
     outcome = live.run_reminders(stand_in, [], env, Web(), str(tmp_path), NOW)
     assert outcome.exit_code == 1 and isinstance(outcome.error, gspread.WorksheetNotFound)
+
+
+# --- Chunk B: the groups "quiet" and "test-mode" --------------------------------------------
+
+
+MONDAY_TO_FRIDAY = [datetime(2026, 11, 16 + n, 17, 0, tzinfo=timezone.utc) for n in range(5)]   # 10:00 in Arizona
+
+
+def sends_and_signins(web):
+    emails = [kwargs["json"]["message"] for url, kwargs in web.calls if url.endswith("/sendMail")]
+    return emails, [url for url, _ in web.calls if "oauth2" in url]
+
+
+def addresses(message):
+    return [r["emailAddress"]["address"] for key in ("toRecipients", "ccRecipients") for r in message.get(key, [])]
+
+
+def test_the_guard_records_what_an_email_said():
+    post, web, outbox = guarded()
+    body = {"message": {**message([SMITH], subject="S")["message"], "body": {"contentType": "Text", "content": "Hello"}}}
+    post(SEND_URL, json=body)
+    assert outbox.sent[0].body == "Hello"
+    assert "Hello" not in repr(outbox.sent[0])
+
+
+def test_the_groups_are_named_and_numbered_as_the_checklist_has_them():
+    groups = {name: (scenarios, sends) for name, scenarios, sends, _ in live.GROUPS}
+    assert groups["plumbing"] == ((), False)
+    assert groups["quiet"] == ((3, 9), False)
+    assert groups["test-mode"] == ((6, 10), True)
+
+
+@pytest.mark.parametrize(
+    "only, expected",
+    [("3", ["quiet"]), ("9", ["quiet"]), ("3,9", ["quiet"]), ("6", ["test-mode"]), ("10", ["test-mode"]),
+     ("6,10", ["test-mode"]), ("3,6", ["quiet", "test-mode"]), ("test-mode,quiet", ["quiet", "test-mode"])],
+)
+def test_scenarios_and_groups_choose_the_groups_that_hold_them(only, expected):
+    assert [g[0] for g in live.choose_groups(only)] == expected
+
+
+# The cases for scenarios 6 and 10
+
+
+@pytest.mark.parametrize("today", WEEKDAYS)
+def test_the_test_mode_roster_has_five_due_cases_and_one_with_no_address(today):
+    first, second = people()
+    roster = live.roster_for_test_mode(today, first, second)
+    assert [c.case_id for c in roster] == ["LC-61", "LC-62", "LC-63", "LC-64", "LC-65", "LC-67"]
+    for case, key in zip(roster[:5], [DAY_1, DAY_5, DAY_8, DAY_10, DAY_11_OVERDUE]):
+        assert decide_reminders(case.exam, today).send.key == key and case.provider_email
+    assert roster[5].provider_email == "" and roster[5].provider == first.typed
+
+
+def test_the_roster_alternates_providers_with_the_day_11_case_the_first_providers():
+    roster = live.roster_for_test_mode(TODAY, *people())
+    assert [c.provider_email for c in roster[:5]] == [SMITH, DOE, SMITH, DOE, SMITH]
+
+
+def test_the_day_3_case_is_due_on_the_fixed_day_and_nothing_else_is():
+    assert live.HELD_BACK_TODAY.weekday() == 1       # a Tuesday, so nothing shifts it
+    decision = decide_reminders(live.HELD_BACK_EXAM, live.HELD_BACK_TODAY)
+    assert decision.send is None and decision.already_sent is None
+    assert [r.key for r, _ in decision.unsent] == [DAY_3]
+
+
+# The scratch helpers
+
+
+def test_discard_scratch_deletes_every_tab_and_empties_the_list():
+    book, created = sandbox(), []
+    live.make_tab(book, created, "Ongoing", live.ONGOING_HEADERS)
+    live.make_tab(book, created, "Finished", live.FINISHED_HEADERS)
+    live.discard_scratch(book, created)
+    assert created == [] and sorted(book.tabs) == ["Contacts", "Ongoing"]
+
+
+def test_a_tab_that_fails_to_delete_stays_in_the_list_so_it_is_not_forgotten():
+    book, created = sandbox(), []
+    tab = live.make_tab(book, created, "Ongoing", live.ONGOING_HEADERS)
+
+    def refuse(_):
+        raise RuntimeError("Google said no")
+
+    book.del_worksheet = refuse
+    with pytest.raises(RuntimeError):
+        live.discard_scratch(book, created)
+    assert created == [tab]
+
+
+def context_for(book):
+    created = []
+    return live.Context(book, created, "unused", live.build_env(REAL_ENV, people()), Web(), live.Outbox(), TODAY, people(), NOW)
+
+
+def test_scratch_replaces_the_tabs_of_the_scenario_before_it():
+    book = sandbox()
+    ctx = context_for(book)
+    live.scratch(ctx, [])
+    live.scratch(ctx, [])
+    assert [t for t in book.tabs if t.startswith(live.PREFIX)] == [live.PREFIX + "Ongoing", live.PREFIX + "Finished"]
+    assert len(ctx.created) == 2
+
+
+def test_scratch_can_leave_a_reminders_sent_tab_as_somebody_left_it():
+    book = sandbox()
+    ctx = context_for(book)
+    table = [["Case ID", "Reminder"], ["LC-1", "DAY_1"]]
+    stand_in = live.scratch(ctx, [], table)
+    tab = stand_in.worksheet("Reminders Sent")
+    assert tab.title == live.PREFIX + "Reminders Sent" and tab.get_all_values() == table
+    live.scratch(ctx, [])
+    assert live.PREFIX + "Reminders Sent" not in book.tabs
+
+
+# The groups, run end to end against the in-memory sheet
+
+
+def test_the_quiet_group_sends_nothing_asks_nothing_and_cleans_up(capsys):
+    code, book, web, questions = go(["--only", "quiet"])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "FAILED" not in out and "checks passed" in out
+    assert web.calls == [] and questions == []
+    assert sorted(book.tabs) == ["Contacts", "Ongoing"] and all(t.writes == [] for t in book.tabs.values())
+
+
+@pytest.mark.parametrize("now", MONDAY_TO_FRIDAY)
+def test_the_quiet_group_passes_on_every_weekday(capsys, now):
+    code, *_ = go(["--only", "quiet"], now=now)
+    assert code == 0, capsys.readouterr().out
+
+
+@pytest.mark.parametrize("now", MONDAY_TO_FRIDAY)
+def test_the_test_mode_group_passes_on_every_weekday(capsys, now):
+    code, *_ = go(["--only", "test-mode"], answers=["yes"], now=now)
+    assert code == 0, capsys.readouterr().out
+
+
+def test_the_test_mode_group_asks_first_and_does_nothing_on_no(capsys):
+    code, book, web, questions = go(["--only", "6"], answers=["no"])
+    assert code == 2 and len(questions) == 1 and web.calls == [] and book.added == []
+
+
+def test_the_test_mode_group_sends_six_test_emails_to_the_first_provider_alone(capsys):
+    code, book, web, _ = go(["--only", "test-mode"], answers=["yes"])
+    emails, signins = sends_and_signins(web)
+    assert code == 0, capsys.readouterr().out
+    assert len(emails) == 6 and len(signins) == 2           # five from the test run, one after the lock is taken over
+    for sent in emails:
+        assert [a.casefold() for a in addresses(sent)] == [SMITH]
+        assert sent["subject"].startswith("[TEST] ")
+    assert sorted(book.tabs) == ["Contacts", "Ongoing"]
+
+
+def test_the_test_mode_group_never_writes_a_reminders_sent_tab(capsys):
+    _, book, _, _ = go(["--only", "test-mode"], answers=["yes"])
+    assert not any("Reminders Sent" in title for title in book.added)
+
+
+def test_a_single_scenario_runs_only_its_group(capsys):
+    _, _, _, questions = go(["--only", "3"])
+    out = capsys.readouterr().out
+    assert "scenario 3" in out and "scenario 9" in out and "scenario 6" not in out and questions == []
+
+
+def test_everything_together_passes_and_asks_once(capsys):
+    code, book, web, questions = go([], answers=["yes"])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert len(questions) == 1 and "FAILED" not in out
+    assert sorted(book.tabs) == ["Contacts", "Ongoing"]
+
+
+def test_the_group_fails_when_the_command_copies_someone_on_a_test_email(capsys, monkeypatch):
+    """The live check must notice a broken test mode, not just run it."""
+    import app.reminders_send as send_module
+
+    real = send_module.deliver
+
+    def copying(plan, send, **kwargs):
+        def with_copy(to, subject, body, cc):
+            send(to, subject, body, (DOE,))
+        return real(plan, with_copy, **kwargs)
+
+    monkeypatch.setattr("app.reminders.deliver", copying)
+    code, *_ = go(["--only", "6"], answers=["yes"])
+    out = capsys.readouterr().out
+    assert code == 1 and "[FAILED] no one was copied" in out
+
+
+def test_the_group_fails_when_the_command_ignores_a_held_lock(capsys, monkeypatch):
+    import app.reminders as reminders
+
+    monkeypatch.setattr(reminders, "_take_lock", lambda logger, config, mode: reminders.acquire("elsewhere.lock", mode, 900))
+    code, *_ = go(["--only", "10"], answers=["yes"])
+    out = capsys.readouterr().out
+    assert code == 1 and "FAILED" in out

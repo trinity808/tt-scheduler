@@ -32,13 +32,21 @@ Google limits a user to 60 read requests a minute, so every request goes through
 same pacer the sweep check uses.
 
 STEPS SO FAR: set-up and clean-up, the guards, the stand-in spreadsheet, the cases, and
-the "plumbing" group, which runs a preview on the cases and sends nothing.
+three groups:
+  plumbing   a preview of the cases; sends nothing
+  quiet      scenarios 3 and 9: no usable address, and a Reminders Sent tab damaged or
+             filled in by hand; previews only, never emails
+  test-mode  scenarios 6 and 10: [TEST] emails to the first provider only, copying no one
+             and logging nothing, and the lock; sends about six test emails
 
 Run from the project root:
     python -m scripts.check_reminders_live --plan      what it would do, touching nothing
     python -m scripts.check_reminders_live --list      the groups of scenarios
     python -m scripts.check_reminders_live             everything
     python -m scripts.check_reminders_live --only plumbing
+    python -m scripts.check_reminders_live --only quiet
+    python -m scripts.check_reminders_live --only test-mode     asks for yes first
+    python -m scripts.check_reminders_live --only 6,10
 """
 
 import argparse
@@ -48,8 +56,10 @@ import logging
 import os
 import sys
 import tempfile
-from dataclasses import dataclass, field
-from datetime import timedelta
+import time
+from pathlib import Path
+from dataclasses import dataclass, field, replace
+from datetime import date, timedelta
 
 import gspread
 import requests
@@ -57,7 +67,17 @@ from gspread.utils import rowcol_to_a1
 
 from app.contacts_tab import load_contacts_tab
 from app.mail_sender import MailError, environment, read_mail_settings
-from app.reminder_rules import BY_KEY, DAY_1, DAY_5, DAY_10, DAY_11_OVERDUE, arizona_today, decide_reminders
+from app.reminder_rules import (
+    BY_KEY,
+    DAY_1,
+    DAY_3,
+    DAY_5,
+    DAY_8,
+    DAY_10,
+    DAY_11_OVERDUE,
+    arizona_today,
+    decide_reminders,
+)
 from app.reminders import main as reminders_main
 from app.reminders_sheet import (
     CASE_ID,
@@ -213,6 +233,7 @@ class Sent:
     cc: list = field(repr=False)
     subject: str
     status: object
+    body: str = field(default="", repr=False)
 
 
 @dataclass
@@ -242,7 +263,13 @@ def guarded_post(allowed, outbox, real_post=None):
                     "addresses, so it was stopped before it was sent"
                 )
             reply = (real_post or requests.post)(url, **kwargs)
-            outbox.sent.append(Sent(to=to, cc=cc, subject=message.get("subject", ""), status=getattr(reply, "status_code", None)))
+            outbox.sent.append(Sent(
+                to=to,
+                cc=cc,
+                subject=message.get("subject", ""),
+                status=getattr(reply, "status_code", None),
+                body=(message.get("body") or {}).get("content", ""),
+            ))
             return reply
         raise Blocked("a request was about to go somewhere other than Microsoft's sign-in or sendMail, so it was stopped")
 
@@ -399,6 +426,28 @@ def build_scratch(sheet, created, cases):
     return stand_in
 
 
+def discard_scratch(sheet, created):
+    """Deletes every scratch tab made so far. A tab leaves the list only once it is deleted."""
+    while created:
+        sheet.del_worksheet(created[-1])
+        created.pop()
+
+
+def scratch(ctx, cases, sent_table=None):
+    """
+    Fresh scratch tabs for one scenario, with `cases` on the Ongoing tab. The earlier
+    scenario's tabs are deleted first, because two tabs can't share a title. `sent_table`,
+    rows including the header, makes a Reminders Sent tab as somebody might have left it.
+    """
+    discard_scratch(ctx.sheet, ctx.created)
+    stand_in = build_scratch(ctx.sheet, ctx.created, cases)
+    if sent_table is not None:
+        tab = make_tab(ctx.sheet, ctx.created, SENT_TAB, sent_table[0], rows=max(30, len(sent_table) + 10))
+        write_table(tab, sent_table)
+        stand_in.adopt(SENT_TAB, tab)
+    return stand_in
+
+
 # --- Running the command ----------------------------------------------------
 
 
@@ -479,7 +528,7 @@ def check_plumbing(ctx):
     cases, the command previews them, and the stand-in refuses every real tab.
     """
     cases = standard_roster(ctx.today, ctx.first, ctx.second)
-    stand_in = build_scratch(ctx.sheet, ctx.created, cases)
+    stand_in = scratch(ctx, cases)
 
     check(
         "the stand-in refuses the real tabs",
@@ -504,9 +553,227 @@ def check_plumbing(ctx):
     check("the lock was never taken", not os.path.exists(os.path.join(ctx.work, "reminders.lock")))
 
 
+# --- Group "quiet": scenarios 3 and 9, which only preview and never email -----
+
+
+def emails_since(ctx, start):
+    """The emails the guard let through after the first `start`, so one scenario can count its own."""
+    return ctx.outbox.sent[start:]
+
+
+def nothing_went_out(ctx, start, tokens):
+    return len(ctx.outbox.sent) == start and ctx.outbox.tokens == tokens
+
+
+def check_no_usable_address(ctx):
+    """Scenario 3: a reminder is due, and there is nowhere to send it."""
+    print("  -- scenario 3: a reminder is due but there is nowhere to send it")
+    start, tokens = len(ctx.outbox.sent), ctx.outbox.tokens
+    cases = [
+        replace(make_case("LC-31", DAY_1, ctx.today, ctx.first), provider_email=""),
+        make_case("LC-32", DAY_5, ctx.today),
+        replace(make_case("LC-33", DAY_10, ctx.today, ctx.first), provider_email="not-an-address"),
+        make_case("LC-34", DAY_5, ctx.today, ctx.second),
+        make_case("LC-35", DAY_11_OVERDUE, ctx.today, ctx.first),
+    ]
+    stand_in = scratch(ctx, cases)
+
+    outcome = run_reminders(stand_in, [], ctx.env, ctx.post, ctx.work, ctx.now)
+    show(outcome.output)
+    report = outcome.output
+    check("the preview ran and ended normally", outcome.exit_code == 0 and outcome.error is None, f"{outcome.exit_code} {outcome.error}")
+    check("three cases need attention", "Needs attention (3):" in report, report[:400])
+    check(
+        "a named provider with no address is reported, with where to look",
+        "Case LC-31: Day 1 materials request is due today but can't be sent: Dr. Smith has no email address" in report,
+    )
+    check(
+        "a case naming no provider is reported",
+        "Case LC-32: Day 5 report check-in is due today but can't be sent: no provider is named" in report,
+    )
+    check(
+        "an address that isn't one is reported",
+        "Case LC-33: Day 10 report due is due today but can't be sent: the Provider Email isn't a valid address" in report,
+    )
+    check("the two usable cases would still be sent", "Would send (2):" in report and "Case LC-34:" in report and "Case LC-35:" in report)
+
+    # The overdue notice also needs somewhere to copy the Director.
+    no_director = dict(ctx.env, STAFF_CC_EMAILS="")
+    outcome = run_reminders(stand_in, [], no_director, ctx.post, ctx.work, ctx.now)
+    report = outcome.output
+    check(
+        "with no Director address the overdue notice is held back, not sent without its copy",
+        "Case LC-35: Day 11 overdue notice is due today but can't be sent: there is no Director address to copy" in report
+        and "Would send (1):" in report,
+        report[:500],
+    )
+    check("no address is in either report", not any(p.email in report for p in ctx.people))
+    check("nothing was sent and nothing was signed in to", nothing_went_out(ctx, start, tokens))
+
+
+def check_by_hand_log(ctx):
+    """Scenario 9: the Reminders Sent tab, damaged, or with rows people typed."""
+    print("  -- scenario 9: the Reminders Sent tab, damaged or filled in by hand")
+    start, tokens = len(ctx.outbox.sent), ctx.outbox.tokens
+    cases = standard_roster(ctx.today, ctx.first, ctx.second)
+
+    damaged = [["Case ID", "Remnder", "Recipient", "Sent On", "Sent At"], ["LC-1", "DAY_1", "Dr. Smith", "", ""]]
+    outcome = run_reminders(scratch(ctx, cases, damaged), [], ctx.env, ctx.post, ctx.work, ctx.now)
+    why = str(outcome.error)
+    check("a header with no Reminder column stops the run", isinstance(outcome.error, ValueError) and outcome.exit_code == 1, f"{outcome.exit_code} {outcome.error!r}")
+    check("and says which tab and which column", SENT_TAB in why and "'Reminder'" in why, why)
+    check("no report was made, so nothing is claimed about what was sent", "Would send" not in outcome.output)
+
+    by_hand = [
+        [" case  id", "REMINDER", "Recipient", "Sent On", "Sent At"],
+        ["LC-1", "day_1", "Dr. Smith", "", ""],
+        ["LC-2", " Day_5 ", "", "", ""],
+        ["LC-3", "DAY_9", "", "", ""],
+    ]
+    outcome = run_reminders(scratch(ctx, cases, by_hand), [], ctx.env, ctx.post, ctx.work, ctx.now)
+    show(outcome.output)
+    report = outcome.output
+    check("headers typed with odd capitals and spaces are still found", outcome.exit_code == 0 and outcome.error is None, f"{outcome.exit_code} {outcome.error!r}")
+    check("reminder names typed by hand count as sent", "Already sent (2):" in report and "Case LC-1: Day 1 materials request" in report and "Case LC-2: Day 5 report check-in" in report)
+    check("a name that isn't a reminder is pointed out, with its row", "Reminders Sent, row 4: 'DAY_9' isn't a reminder name" in report, report[-500:])
+    check("it does not stop the other cases being sent", "Would send (2):" in report and "Case LC-3:" in report and "Case LC-4:" in report)
+    check("nothing was sent and nothing was signed in to", nothing_went_out(ctx, start, tokens))
+
+
+def check_quiet(ctx):
+    check_no_usable_address(ctx)
+    print()
+    check_by_hand_log(ctx)
+
+
+# --- Group "test-mode": scenarios 6 and 10, which send [TEST] email to the first provider ---
+
+HELD_BACK_TODAY = date(2026, 11, 10)   # a Tuesday, given to the command with --today
+HELD_BACK_EXAM = date(2026, 11, 7)     # three days before it: Day 3 is due, and nothing else is
+
+
+def roster_for_test_mode(today, first, second):
+    """One case for each reminder that can be sent, and one with nowhere to send it."""
+    keys = (DAY_1, DAY_5, DAY_8, DAY_10, DAY_11_OVERDUE)
+    owners = (first, second, first, second, first)
+    cases = [make_case(f"LC-6{n}", key, today, owner) for n, (key, owner) in enumerate(zip(keys, owners), start=1)]
+    cases.append(replace(make_case("LC-67", DAY_5, today, first), provider_email=""))
+    return cases
+
+
+def check_test_emails(ctx):
+    """Scenario 6: a test run sends every reminder to the test address, marked, copying no one, logging nothing."""
+    print("  -- scenario 6: test emails go to the test address only")
+    cases = roster_for_test_mode(ctx.today, ctx.first, ctx.second)
+    sendable = [c.case_id for c in cases[:5]]
+    stand_in = scratch(ctx, cases)
+
+    start, tokens = len(ctx.outbox.sent), ctx.outbox.tokens
+    outcome = run_reminders(stand_in, ["--live", "--test", "--show-text"], ctx.env, ctx.post, ctx.work, ctx.now)
+    show(outcome.output)
+    report = outcome.output
+    sent = emails_since(ctx, start)
+
+    check("the test run ended normally", outcome.exit_code == 0 and outcome.error is None, f"{outcome.exit_code} {outcome.error!r}")
+    check("it is headed as a live test", "LIVE TEST: every email went to the test address" in report)
+    check("five reminders were sent, one for each day that sends", "Sent (5):" in report and len(sent) == 5, f"{len(sent)} emails")
+    check("it signed in once", ctx.outbox.tokens == tokens + 1)
+    check(
+        "every email went to the test address and to no one else",
+        all([a.casefold() for a in e.to] == [ctx.first.email.casefold()] for e in sent),
+    )
+    check("no one was copied, not even on the overdue notice", all(e.cc == [] for e in sent))
+    check("every subject says it is a test", all(e.subject.startswith("[TEST] ") for e in sent))
+    check(
+        "there is one email for each of the five cases",
+        sorted(i for e in sent for i in sendable if f"DDS case {i}" in e.subject) == sorted(sendable),
+    )
+    check(
+        "each email opens by saying who it would really have gone to",
+        all(e.body.startswith("[TEST] This reminder would have gone to Dr. ") for e in sent),
+    )
+    overdue = [e for e in sent if "OVERDUE" in e.subject]
+    check(
+        "only the overdue notice says the Director would have been copied",
+        len(overdue) == 1 and "with the Director copied" in overdue[0].body
+        and sum("with the Director copied" in e.body for e in sent) == 1,
+    )
+    check("--show-text printed the emails' text", "Hello Dr. Smith," in report and "Hello Dr. Doe," in report)
+    check("the case with no address is reported and the rest still went", "Needs attention (1):" in report and "Case LC-67:" in report)
+    check("no address is in the report", not any(p.email in report for p in ctx.people))
+    check("nothing was logged: no Reminders Sent tab was made", not any(t.title == PREFIX + SENT_TAB for t in ctx.sheet.worksheets()))
+    check("the lock was given back", not os.path.exists(os.path.join(ctx.work, "reminders.lock")))
+
+    # A real send must not accept --today, which would log it as another day.
+    start, tokens = len(ctx.outbox.sent), ctx.outbox.tokens
+    outcome = run_reminders(stand_in, ["--live", "--today", ctx.today.isoformat()], ctx.env, ctx.post, ctx.work, ctx.now)
+    check(
+        "a real send with --today is refused before anything happens",
+        outcome.exit_code == 2 and "Nothing was done." in outcome.output and "--today can't be used" in outcome.output and nothing_went_out(ctx, start, tokens),
+        outcome.output[:300],
+    )
+
+    # Day 3 is due but isn't sent, because nothing records whether the materials are in.
+    lone = CheckCase("LC-66", DAY_3, HELD_BACK_EXAM, ctx.first.typed, ctx.first.email)
+    outcome = run_reminders(
+        scratch(ctx, [lone]), ["--today", HELD_BACK_TODAY.isoformat(), "--show-text"], ctx.env, ctx.post, ctx.work, ctx.now
+    )
+    show(outcome.output)
+    report = outcome.output
+    check(
+        "Day 3 is due but held back, and says why",
+        "Would send: nothing today." in report
+        and "Due but not sent (1):" in report
+        and "Case LC-66: Day 3 materials overdue notice" in report
+        and "materials status isn't tracked yet" in report,
+        report[:400],
+    )
+    check("nothing was sent for it", nothing_went_out(ctx, start, tokens))
+
+
+def check_lock(ctx):
+    """Scenario 10: a live run does nothing while another holds the lock, and takes over a lock left by a crash."""
+    print("  -- scenario 10: the lock")
+    lock = os.path.join(ctx.work, "reminders.lock")
+    stand_in = scratch(ctx, [make_case("LC-101", DAY_1, ctx.today, ctx.first)])
+    argv = ["--live", "--test"]
+    started = time.strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        Path(lock).write_text(
+            '{"pid": 99999, "mode": "live", "started": "%s", "token": "somebody-else"}' % started, encoding="utf-8"
+        )
+        before = Path(lock).read_text(encoding="utf-8")
+
+        start, tokens = len(ctx.outbox.sent), ctx.outbox.tokens
+        outcome = run_reminders(stand_in, argv, ctx.env, ctx.post, ctx.work, ctx.now)
+        print(f"  | {outcome.output.strip()}")
+        check("a recent lock stops the run, which ends without an error", outcome.exit_code == 0 and outcome.error is None, f"{outcome.exit_code} {outcome.error!r}")
+        check("it says another run is going", "Another live reminders run is already going" in outcome.output)
+        check("nothing was sent and nothing was signed in to", nothing_went_out(ctx, start, tokens))
+        check("the other run's lock was left alone", os.path.exists(lock) and Path(lock).read_text(encoding="utf-8") == before)
+
+        long_ago = time.time() - 20 * 60
+        os.utime(lock, (long_ago, long_ago))
+        outcome = run_reminders(stand_in, argv, ctx.env, ctx.post, ctx.work, ctx.now)
+        print(f"  | {outcome.output.strip().splitlines()[0] if outcome.output.strip() else ''}")
+        check("a lock older than the limit is taken over and the run goes ahead", outcome.exit_code == 0 and "Sent (1):" in outcome.output and len(emails_since(ctx, start)) == 1, outcome.output[:300])
+        check("the run gave the lock back when it finished", not os.path.exists(lock))
+    finally:
+        if os.path.exists(lock):
+            os.remove(lock)
+
+
+def check_test_mode(ctx):
+    check_test_emails(ctx)
+    print()
+    check_lock(ctx)
+
+
 # name, the scenarios in it (numbers from the checklist), whether it sends real email, its function
 GROUPS = [
     ("plumbing", (), False, check_plumbing),
+    ("quiet", (3, 9), False, check_quiet),
+    ("test-mode", (6, 10), True, check_test_mode),
 ]
 
 
@@ -641,8 +908,7 @@ def main(argv=None, sheet=None, ask=input, post=None, now=None, environ=None):
                 function(ctx)
                 print()
     finally:
-        for tab in created:
-            sheet.del_worksheet(tab)
+        discard_scratch(sheet, created)
         print("Scratch tabs deleted.")
 
     left = [t.title for t in sheet.worksheets() if t.title.startswith(PREFIX)]
