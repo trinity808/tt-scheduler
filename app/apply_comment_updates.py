@@ -110,7 +110,10 @@ from app.run_lock import LockHeld, acquire, describe, minutes_from_config, relea
 from app.services_cell import parse_services_cell
 from app.services_tab import ServicesTab, flag_services_tab, load_services_tab
 from app.services_update import build_final_services
-from app.sheet_client import get_header_map, update_case_field
+from app.sheet_client import (
+    get_header_map,
+    update_case_field,
+)
 
 
 ONGOING_TAB = "Ongoing"
@@ -270,7 +273,10 @@ def _sync_email(
     )
 
 
-def apply_comment_updates(worksheet, lookup=None, metadata=None, dry_run=False, contacts=None):
+def apply_comment_updates(
+    worksheet, lookup=None, metadata=None, dry_run=False,
+    contacts=None
+):
     """
     Reads every case row's Comments cell, parses it, applies
     Provider/Psychometrist where present and changed, applies test
@@ -337,7 +343,7 @@ def apply_comment_updates(worksheet, lookup=None, metadata=None, dry_run=False, 
 
     applying = metadata is not None and services_idx is not None
     stored = read_all_case_tests(metadata) if applying else None
-
+    
     results = []
 
     for row_number, row in enumerate(all_values[1:], start=2):
@@ -463,9 +469,15 @@ def run_sweep(spreadsheet, metadata=None, dry_run=False):
         contacts_flag = "no_tab" if contacts.worksheet is None else "dry_run"
     else:
         contacts_flag = flag_contacts_tab(contacts.worksheet, contacts.problems)
+
     results = apply_comment_updates(
-        spreadsheet.worksheet(ONGOING_TAB), services.lookup, metadata, dry_run, contacts.lookup
+        spreadsheet.worksheet(ONGOING_TAB),
+        services.lookup,
+        metadata,
+        dry_run,
+        contacts.lookup,
     )
+    
     return SweepReport(
         results=results, services=services, services_flag=services_flag, dry_run=dry_run,
         contacts=contacts, contacts_flag=contacts_flag,
