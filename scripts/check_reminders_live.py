@@ -723,7 +723,7 @@ def check_test_emails(ctx):
     sent = emails_since(ctx, start)
 
     check("the test run ended normally", outcome.exit_code == 0 and outcome.error is None, f"{outcome.exit_code} {outcome.error!r}")
-    check("it is headed as a live test", "LIVE TEST: every email went to the test address" in report)
+    check("it is headed as a live test", "LIVE TEST: emails go to the test address only" in report)
     check("five reminders were sent, one for each day that sends", "Sent (5):" in report and len(sent) == 5, f"{len(sent)} emails")
     check("it signed in once", ctx.outbox.tokens == tokens + 1)
     check(

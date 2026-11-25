@@ -60,10 +60,10 @@ def _who(planned):
 
 BANNERS = {
     "preview": "PREVIEW: nothing was sent, and nothing was written to the sheet.",
-    "live": "LIVE: the reminders below were sent to the providers and written to the Reminders Sent tab.",
+    "live": "LIVE: real emails to the providers. Each one sent is written to the Reminders Sent tab.",
     "live test": (
-        "LIVE TEST: every email went to the test address, marked [TEST]. "
-        "Nothing was written to the Reminders Sent tab."
+        "LIVE TEST: emails go to the test address only, marked [TEST]. "
+        "Nothing is written to the Reminders Sent tab."
     ),
 }
 
