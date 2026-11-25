@@ -30,6 +30,7 @@ from app.reminders_sheet import (
     SENT_REMINDER,
     SENT_TAB,
     _find_columns,  # the same header matching the reader uses
+    tab_is_blank,
 )
 
 
@@ -58,7 +59,7 @@ class SentLog:
             )
 
         rows = worksheet.get_all_values()
-        if not rows:
+        if tab_is_blank(rows):
             worksheet.update(
                 range_name=f"{rowcol_to_a1(1, 1)}:{rowcol_to_a1(1, len(SENT_HEADERS))}",
                 values=[list(SENT_HEADERS)],

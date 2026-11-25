@@ -20,6 +20,7 @@ from app.reminder_rules import ARIZONA
 from app.reminders_sent_log import ROWS_AT_START, ROWS_TO_ADD, SentLog
 from app.reminders_sheet import FINISHED_TAB, ONGOING_TAB, SENT_HEADERS, SENT_TAB, read_reminder_data
 from tests.fakes import FakeSpreadsheet, FakeWorksheet
+from tests.google_like import GoogleLikeWorksheet
 
 
 WHEN = datetime(2026, 5, 11, 8, 30, 5, tzinfo=ARIZONA)
@@ -39,7 +40,7 @@ class Book:
 
     def add_worksheet(self, title, rows, cols):
         self.added.append((title, rows, cols))
-        self.tabs[title] = FakeWorksheet([[""] * cols], row_count=rows)  # a new tab is blank
+        self.tabs[title] = GoogleLikeWorksheet([[""] * cols], row_count=rows)  # a new tab is blank, and Google says [[]]
         return self.tabs[title]
 
 
@@ -62,10 +63,35 @@ def test_a_missing_tab_is_created_with_the_headers():
 
 
 def test_an_existing_empty_tab_gets_the_headers_and_is_not_replaced():
-    book = Book({SENT_TAB: FakeWorksheet([[""] * 5])})
+    book = Book({SENT_TAB: GoogleLikeWorksheet([[""] * 5])})
     SentLog.open(book)
     assert book.added == []
     assert table(book) == [SENT_HEADERS]
+
+
+@pytest.mark.parametrize("blank", [[], [[]], [[""]], [["", "", "", "", ""]], [[" "], [""]]])
+def test_every_shape_of_nothing_counts_as_an_empty_tab(blank):
+    """Google gives back [[]] for a blank tab, not []. A live check found it; a fake that said [] hid it."""
+
+    class Blank:
+        def get_all_values(self):
+            return [list(row) for row in blank]
+
+        def update(self, range_name, values):
+            self.written = (range_name, values)
+
+    tab = Blank()
+    book = Book({SENT_TAB: tab})
+    log = SentLog.open(book)
+    assert tab.written == ("A1:E1", [list(SENT_HEADERS)])
+    assert log.next_row == 2
+
+
+def test_a_tab_with_rows_but_a_blank_header_is_not_mistaken_for_an_empty_one():
+    book = Book({SENT_TAB: GoogleLikeWorksheet([[""] * 5, ["111", "DAY_5", "Dr. Doe", "2026-05-11", "08:30:05"]])})
+    with pytest.raises(ValueError, match="no 'Case ID', 'Reminder' column"):
+        SentLog.open(book)
+    assert book.tabs[SENT_TAB].writes == []
 
 
 def test_an_existing_tab_is_used_as_it_is():
