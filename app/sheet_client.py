@@ -1,12 +1,22 @@
 """
-Google Sheets client — column mapping and case lookup.
+Google Sheets client — connection, column mapping, case lookup,
+field updates, and service pricing.
 
 Design notes:
-- Column lookups go by header name, not hardcoded position, since the
-  column layout is still a draft and expected to shift.
-- find_case_row() loads the whole tab in one API call and searches in
-  memory, rather than one API call per case, to avoid hitting Sheets
-  API rate limits when processing a batch of cases in a single run.
+- Column lookups use header names rather than hardcoded positions,
+  since the spreadsheet layout may change.
+- find_case_row() loads the entire worksheet in one API call
+  and searches in memory to reduce Google Sheets API requests.
+- update_case_field() updates a single field without modifying
+  other columns in the row.
+- load_service_prices() reads service codes and their prices
+  from the Services tab.
+- calculate_service_price() extracts all service codes from
+  Services Requested and calculates their combined price.
+- Missing service prices are reported rather than calculating
+  an incomplete total.
+- Price updates are handled separately by
+  app/update_service_prices.py, which uses these helpers.
 """
 
 import os
@@ -129,23 +139,6 @@ def calculate_service_price(services_requested, prices):
         raise ValueError(
             "Missing prices for: " + ", ".join(missing_codes)
         )
-
-    return total
-
-
-def update_case_price(worksheet, row_number, prices):
-    """Recalculate and update a case's Price field."""
-    headers = get_header_map(worksheet)
-
-    services = worksheet.cell(
-        row_number, headers["Services Requested"]
-    ).value
-
-    total = calculate_service_price(services, prices)
-
-    update_case_field(
-        worksheet, row_number, "Price", float(total)
-    )
 
     return total
 

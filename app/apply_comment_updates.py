@@ -113,8 +113,6 @@ from app.services_update import build_final_services
 from app.sheet_client import (
     get_header_map,
     update_case_field,
-    load_service_prices,
-    calculate_service_price,
 )
 
 
@@ -275,7 +273,10 @@ def _sync_email(
     )
 
 
-def apply_comment_updates(worksheet, lookup=None, metadata=None, dry_run=False, contacts=None):
+def apply_comment_updates(
+    worksheet, lookup=None, metadata=None, dry_run=False,
+    contacts=None
+):
     """
     Reads every case row's Comments cell, parses it, applies
     Provider/Psychometrist where present and changed, applies test
@@ -342,11 +343,6 @@ def apply_comment_updates(worksheet, lookup=None, metadata=None, dry_run=False, 
 
     applying = metadata is not None and services_idx is not None
     stored = read_all_case_tests(metadata) if applying else None
-
-        # Load service prices once for the entire sweep.
-    prices = load_service_prices(
-        worksheet.spreadsheet.worksheet("Services")
-    )
     
     results = []
 
@@ -416,27 +412,6 @@ def apply_comment_updates(worksheet, lookup=None, metadata=None, dry_run=False, 
                 cell_text, lookup, metadata, stored, dry_run,
             )
             flags += services_flags
-                # Calculate price from the final requested services.
-        if services["status"] in ("updated", "unchanged"):
-            try:
-                service_update = services.get("update")
-
-                if service_update is not None:
-                    final_services_text = service_update.text
-                else:
-                    final_services_text = cell_text
-
-                total = calculate_service_price(
-                    final_services_text, prices
-                )
-
-                if not dry_run:
-                    update_case_field(
-                        worksheet, row_number, "Price", float(total)
-                    )
-
-            except (ValueError, KeyError) as exc:
-                flags.append(f"Price calculation skipped: {exc}")
 
         if not dry_run:
             comments_cell = rowcol_to_a1(row_number, header_map["Comments"])
@@ -494,9 +469,15 @@ def run_sweep(spreadsheet, metadata=None, dry_run=False):
         contacts_flag = "no_tab" if contacts.worksheet is None else "dry_run"
     else:
         contacts_flag = flag_contacts_tab(contacts.worksheet, contacts.problems)
+
     results = apply_comment_updates(
-        spreadsheet.worksheet(ONGOING_TAB), services.lookup, metadata, dry_run, contacts.lookup
+        spreadsheet.worksheet(ONGOING_TAB),
+        services.lookup,
+        metadata,
+        dry_run,
+        contacts.lookup,
     )
+    
     return SweepReport(
         results=results, services=services, services_flag=services_flag, dry_run=dry_run,
         contacts=contacts, contacts_flag=contacts_flag,
