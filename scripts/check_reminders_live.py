@@ -34,10 +34,12 @@ same pacer the sweep check uses.
 STEPS SO FAR: set-up and clean-up, the guards, the stand-in spreadsheet, the cases, and
 three groups:
   plumbing   a preview of the cases; sends nothing
-  quiet      scenarios 3 and 9: no usable address, and a Reminders Sent tab damaged or
-             filled in by hand; previews only, never emails
+  quiet      scenarios 3, 9 and 11: no usable address, a Reminders Sent tab damaged or
+             filled in by hand, and whether failure alerts are on; never emails
   test-mode  scenarios 6 and 10: [TEST] emails to the first provider only, copying no one
              and logging nothing, and the lock; sends about six test emails
+  failures   scenarios 7 and 8: a wrong sender and a wrong secret, which Microsoft
+             refuses, then a run that sends what failed; sends three real (unmarked) emails
 
 Run from the project root:
     python -m scripts.check_reminders_live --plan      what it would do, touching nothing
@@ -46,6 +48,7 @@ Run from the project root:
     python -m scripts.check_reminders_live --only plumbing
     python -m scripts.check_reminders_live --only quiet
     python -m scripts.check_reminders_live --only test-mode     asks for yes first
+    python -m scripts.check_reminders_live --only failures      asks for yes first
     python -m scripts.check_reminders_live --only 6,10
 """
 
@@ -57,7 +60,9 @@ import os
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
+from urllib.parse import quote
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 
@@ -113,6 +118,11 @@ def check(label, ok, detail=""):
     if not ok and detail:
         line += f"  ->  {detail}"
     print(line)
+
+
+def note(text):
+    """Something to read, which is neither a pass nor a failure."""
+    print(f"  [NOTE] {text}")
 
 
 class Refusal(Exception):
@@ -640,10 +650,48 @@ def check_by_hand_log(ctx):
     check("nothing was sent and nothing was signed in to", nothing_went_out(ctx, start, tokens))
 
 
+def read_alert_setting():
+    """
+    Whether the settings file turns on the email alert for a failed run, read from the real
+    config/settings.json. Returns (the setting, a problem), and the problem is "" if the file
+    was read. Nothing is sent: the alert would go to people other than the two test addresses.
+    """
+    from app.config_loader import load_config
+
+    try:
+        config = load_config()
+        health = config.get("health_check") or {}
+        return health.get("email_notifications_enabled"), ""
+    except Exception as error:
+        return None, f"{type(error).__name__}: {error}"
+
+
+def check_alerts(ctx):
+    """Scenario 11: whether anyone is told when the reminders fail. Reported, not tested."""
+    print("  -- scenario 11: whether anyone is told when the reminders fail")
+    enabled, problem = read_alert_setting()
+    check("the settings file can be read", problem == "", problem)
+    if problem:
+        return
+    if enabled is True:
+        note(
+            "Failure alerts by email are ON in config/settings.json. A failed run sends the usual alert. "
+            "This check does not send one, because it would reach people other than the two test addresses."
+        )
+    else:
+        note(
+            "Failure alerts by email are OFF in config/settings.json (health_check.email_notifications_enabled "
+            "is not true). A failed reminders run is printed and written to the log, and nobody is emailed. "
+            "If the reminders will run on a schedule that nobody watches, that is worth telling Dr."
+        )
+
+
 def check_quiet(ctx):
     check_no_usable_address(ctx)
     print()
     check_by_hand_log(ctx)
+    print()
+    check_alerts(ctx)
 
 
 # --- Group "test-mode": scenarios 6 and 10, which send [TEST] email to the first provider ---
@@ -769,11 +817,96 @@ def check_test_mode(ctx):
     check_lock(ctx)
 
 
+# --- Group "failures": scenarios 7 and 8, when Microsoft says no ------------------
+
+
+def wrong_sender(env):
+    """An address on the sender's own domain that no mailbox has, so Microsoft refuses it."""
+    domain = env["MICROSOFT_SENDER_EMAIL"].strip().split("@", 1)[1]
+    return f"reminder-check-no-such-mailbox-{uuid.uuid4().hex[:8]}@{domain}"
+
+
+def logged_rows(ctx):
+    """The rows under the header of the scratch Reminders Sent tab. None if there is no such tab."""
+    for tab in ctx.sheet.worksheets():
+        if tab.title == PREFIX + SENT_TAB:
+            return tab.get_all_values()[1:]
+    return None
+
+
+def check_wrong_sender(ctx):
+    """Scenario 7: a sender Microsoft refuses fails each email, logs none, and a later run sends them."""
+    print("  -- scenario 7: the sender mailbox is wrong")
+    cases = [
+        make_case("LC-71", DAY_1, ctx.today, ctx.first),
+        make_case("LC-72", DAY_11_OVERDUE, ctx.today, ctx.first),
+        make_case("LC-73", DAY_5, ctx.today, ctx.second),
+    ]
+    stand_in = scratch(ctx, cases)
+    fake = wrong_sender(ctx.env)
+
+    start, tokens = len(ctx.outbox.sent), ctx.outbox.tokens
+    outcome = run_reminders(stand_in, ["--live"], dict(ctx.env, MICROSOFT_SENDER_EMAIL=fake), ctx.post, ctx.work, ctx.now)
+    show(outcome.output)
+    report = outcome.output
+    tried = emails_since(ctx, start)
+    check("a run where emails failed ends with exit code 1, not a crash", outcome.exit_code == 1 and outcome.error is None, f"{outcome.exit_code} {outcome.error!r}")
+    check("every email was tried and every one failed", "Failed to send (3)" in report and len(tried) == 3 and all(e.status != 202 for e in tried), f"{[e.status for e in tried]}")
+    check("each failure says Microsoft refused it, and why", report.count("Microsoft refused the email (HTTP 4") == 3, report[:600])
+    check("the report says nothing was sent", "Sent: nothing today." in report)
+    hidden = [fake, quote(fake, safe=""), ctx.env["MICROSOFT_SENDER_EMAIL"], quote(ctx.env["MICROSOFT_SENDER_EMAIL"], safe=""), ctx.env["MICROSOFT_CLIENT_SECRET"]]
+    check("no sender address and no secret is in the report", not any(value in report for value in hidden))
+    check("nothing was logged as sent", logged_rows(ctx) == [], f"{logged_rows(ctx)}")
+    check("the lock was given back", not os.path.exists(os.path.join(ctx.work, "reminders.lock")))
+
+    # With the sender put right, the next run sends them, since none was logged.
+    start = len(ctx.outbox.sent)
+    outcome = run_reminders(stand_in, ["--live"], ctx.env, ctx.post, ctx.work, ctx.now)
+    show(outcome.output)
+    sent = emails_since(ctx, start)
+    check("the next run sends all three", outcome.exit_code == 0 and "Sent (3):" in outcome.output and len(sent) == 3 and all(e.status == 202 for e in sent), outcome.output[:300])
+    check(
+        "they went to the providers, with the Director copied on the overdue notice only",
+        sorted((e.to[0].casefold(), len(e.cc)) for e in sent)
+        == sorted([(ctx.first.email.casefold(), 0), (ctx.first.email.casefold(), 1), (ctx.second.email.casefold(), 0)])
+        and all(e.cc == [ctx.second.email] for e in sent if "OVERDUE" in e.subject),
+    )
+    check("none of them is marked as a test", not any(e.subject.startswith("[TEST]") for e in sent))
+    check("no sender address and no secret is in that report either", not any(value in outcome.output for value in hidden))
+    rows = logged_rows(ctx) or []
+    check("and each is now logged as sent", sorted((r[0], r[1]) for r in rows) == [("LC-71", "DAY_1"), ("LC-72", "DAY_11_OVERDUE"), ("LC-73", "DAY_5")], f"{rows}")
+
+
+def check_wrong_secret(ctx):
+    """Scenario 8: a secret Microsoft refuses stops the run before any email, and the secret stays out of the words."""
+    print("  -- scenario 8: the client secret is wrong")
+    stand_in = scratch(ctx, [make_case("LC-81", DAY_1, ctx.today, ctx.first)])
+    bad = f"wrong-secret-{uuid.uuid4().hex}"
+    start, tokens = len(ctx.outbox.sent), ctx.outbox.tokens
+
+    outcome = run_reminders(stand_in, ["--live"], dict(ctx.env, MICROSOFT_CLIENT_SECRET=bad), ctx.post, ctx.work, ctx.now)
+    why = str(outcome.error)
+    print(f"  | {type(outcome.error).__name__}: {why}")
+    check("the run stops with an error and exit code 1", isinstance(outcome.error, MailError) and outcome.exit_code == 1, f"{outcome.exit_code} {outcome.error!r}")
+    check("the error says the sign-in failed, and why", "Microsoft sign-in failed (HTTP 4" in why, why)
+    check("neither the wrong secret nor the real one is in the error or the output", all(secret not in why + outcome.output for secret in (bad, ctx.env["MICROSOFT_CLIENT_SECRET"])))
+    check("it signed in once and sent nothing", len(ctx.outbox.sent) == start and ctx.outbox.tokens == tokens + 1)
+    check("nothing was logged as sent", not logged_rows(ctx), f"{logged_rows(ctx)}")
+    check("the lock was given back", not os.path.exists(os.path.join(ctx.work, "reminders.lock")))
+
+
+def check_failures(ctx):
+    check_wrong_sender(ctx)
+    print()
+    check_wrong_secret(ctx)
+
+
 # name, the scenarios in it (numbers from the checklist), whether it sends real email, its function
 GROUPS = [
     ("plumbing", (), False, check_plumbing),
-    ("quiet", (3, 9), False, check_quiet),
+    ("quiet", (3, 9, 11), False, check_quiet),
     ("test-mode", (6, 10), True, check_test_mode),
+    ("failures", (7, 8), True, check_failures),
 ]
 
 

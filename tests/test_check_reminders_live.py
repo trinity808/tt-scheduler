@@ -55,6 +55,12 @@ def start_from_nothing(tmp_path, monkeypatch):
     live.results.clear()
 
 
+@pytest.fixture(autouse=True)
+def alerts_are_off(monkeypatch):
+    """The real config/settings.json is not read: its alert setting is whatever the test says."""
+    monkeypatch.setattr("app.config_loader.load_config", lambda: {"health_check": {"email_notifications_enabled": False}})
+
+
 class Tab(FakeWorksheet):
     """A worksheet that knows its title, as a real one does."""
 
@@ -120,7 +126,11 @@ class Reply:
 
 
 class Web:
-    """Stands in for requests.post: a sign-in gives a token, and an email is accepted."""
+    """
+    Stands in for requests.post, as Microsoft answers it: a sign-in with the right secret gives
+    a token and one with any other is refused, and an email is accepted only from the real
+    sender, since a mailbox that doesn't exist is refused.
+    """
 
     def __init__(self):
         self.calls = []
@@ -128,8 +138,20 @@ class Web:
     def __call__(self, url, **kwargs):
         self.calls.append((url, kwargs))
         if "oauth2" in url:
+            if kwargs.get("data", {}).get("client_secret") != REAL_ENV["MICROSOFT_CLIENT_SECRET"]:
+                return Reply(401, {"error": "invalid_client", "error_description": "AADSTS7000215: Invalid client secret provided."})
             return Reply(200, {"access_token": "token-value-9917"})
+        if "support.sender.3300%40example.test" not in url:
+            return Reply(404, {"error": {"code": "ErrorInvalidUser"}})
         return Reply(202)
+
+
+class AcceptsAnything(Web):
+    """A Microsoft that accepts any secret and any sender, which the real one does not."""
+
+    def __call__(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return Reply(200, {"access_token": "token-value-9917"}) if "oauth2" in url else Reply(202)
 
 
 def people():
@@ -730,14 +752,17 @@ def test_the_guard_records_what_an_email_said():
 def test_the_groups_are_named_and_numbered_as_the_checklist_has_them():
     groups = {name: (scenarios, sends) for name, scenarios, sends, _ in live.GROUPS}
     assert groups["plumbing"] == ((), False)
-    assert groups["quiet"] == ((3, 9), False)
+    assert groups["quiet"] == ((3, 9, 11), False)
     assert groups["test-mode"] == ((6, 10), True)
+    assert groups["failures"] == ((7, 8), True)
 
 
 @pytest.mark.parametrize(
     "only, expected",
     [("3", ["quiet"]), ("9", ["quiet"]), ("3,9", ["quiet"]), ("6", ["test-mode"]), ("10", ["test-mode"]),
-     ("6,10", ["test-mode"]), ("3,6", ["quiet", "test-mode"]), ("test-mode,quiet", ["quiet", "test-mode"])],
+     ("6,10", ["test-mode"]), ("3,6", ["quiet", "test-mode"]), ("test-mode,quiet", ["quiet", "test-mode"]),
+     ("7", ["failures"]), ("8", ["failures"]), ("7,8", ["failures"]), ("11", ["quiet"]),
+     ("failures,plumbing", ["plumbing", "failures"])],
 )
 def test_scenarios_and_groups_choose_the_groups_that_hold_them(only, expected):
     assert [g[0] for g in live.choose_groups(only)] == expected
@@ -898,5 +923,140 @@ def test_the_group_fails_when_the_command_ignores_a_held_lock(capsys, monkeypatc
 
     monkeypatch.setattr(reminders, "_take_lock", lambda logger, config, mode: reminders.acquire("elsewhere.lock", mode, 900))
     code, *_ = go(["--only", "10"], answers=["yes"])
+    out = capsys.readouterr().out
+    assert code == 1 and "FAILED" in out
+
+
+# --- Chunk C: scenarios 7, 8 and 11 -----------------------------------------------------------
+
+
+def test_the_wrong_sender_is_on_the_real_senders_domain_and_is_never_the_same_twice():
+    first, second = live.wrong_sender(REAL_ENV), live.wrong_sender(REAL_ENV)
+    assert first.endswith("@example.test") and first != second
+    assert first != REAL_ENV["MICROSOFT_SENDER_EMAIL"] and "support.sender" not in first
+
+
+@pytest.mark.parametrize(
+    "config, expected",
+    [({"health_check": {"email_notifications_enabled": True}}, True),
+     ({"health_check": {"email_notifications_enabled": False}}, False),
+     ({"health_check": {}}, None), ({}, None), ({"health_check": None}, None)],
+)
+def test_the_alert_setting_is_read_from_the_settings_file(monkeypatch, config, expected):
+    monkeypatch.setattr("app.config_loader.load_config", lambda: config)
+    assert live.read_alert_setting() == (expected, "")
+
+
+def test_a_settings_file_that_cannot_be_read_is_reported(monkeypatch):
+    def missing():
+        raise FileNotFoundError("config/settings.json")
+
+    monkeypatch.setattr("app.config_loader.load_config", missing)
+    setting, problem = live.read_alert_setting()
+    assert setting is None and "FileNotFoundError" in problem
+
+
+@pytest.mark.parametrize("enabled, wanted", [(True, "are ON"), (False, "are OFF"), (None, "are OFF")])
+def test_the_alert_scenario_says_whether_alerts_are_on_and_is_not_a_pass_or_fail(capsys, monkeypatch, enabled, wanted):
+    monkeypatch.setattr("app.config_loader.load_config", lambda: {"health_check": {"email_notifications_enabled": enabled}})
+    live.check_alerts(context_for(sandbox()))
+    out = capsys.readouterr().out
+    assert "[NOTE]" in out and wanted in out
+    assert live.results == [True]         # only "the file can be read" counts
+
+
+def test_an_unreadable_settings_file_fails_the_check(capsys, monkeypatch):
+    monkeypatch.setattr("app.config_loader.load_config", lambda: (_ for _ in ()).throw(OSError("no file")))
+    live.check_alerts(context_for(sandbox()))
+    assert live.results == [False] and "[FAILED] the settings file can be read" in capsys.readouterr().out
+
+
+def test_the_quiet_group_reports_the_alert_setting(capsys):
+    code, *_ = go(["--only", "11"])
+    out = capsys.readouterr().out
+    assert code == 0 and "scenario 11" in out and "Failure alerts by email are OFF" in out
+
+
+def test_the_failures_group_asks_first_and_does_nothing_on_no(capsys):
+    code, book, web, questions = go(["--only", "failures"], answers=["no"])
+    assert code == 2 and len(questions) == 1 and web.calls == [] and book.added == []
+
+
+def test_the_failures_group_passes_and_sends_three_real_emails_to_the_two_providers(capsys):
+    code, book, web, _ = go(["--only", "failures"], answers=["yes"])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    emails, signins = sends_and_signins(web)
+    assert len(signins) == 3                                      # the wrong sender, the retry, the wrong secret
+    assert len(emails) == 6 and not any(m["subject"].startswith("[TEST]") for m in emails)   # three refused, three accepted
+    for sent in emails:
+        assert set(a.casefold() for a in addresses(sent)) <= {SMITH, DOE}
+    assert sorted(book.tabs) == ["Contacts", "Ongoing"]
+
+
+@pytest.mark.parametrize("now", MONDAY_TO_FRIDAY)
+def test_the_failures_group_passes_on_every_weekday(capsys, now):
+    code, *_ = go(["--only", "failures"], answers=["yes"], now=now)
+    assert code == 0, capsys.readouterr().out
+
+
+def test_no_secret_or_sender_appears_anywhere_in_the_output(capsys):
+    go(["--only", "failures"], answers=["yes"])
+    out = capsys.readouterr().out
+    assert REAL_ENV["MICROSOFT_CLIENT_SECRET"] not in out
+    assert "support.sender.3300" not in out and "reminder-check-no-such-mailbox" not in out
+    assert "wrong-secret-" not in out.replace("neither the wrong secret", "")
+
+
+def test_the_check_notices_when_an_error_carries_the_senders_address_in_its_url(capsys, monkeypatch):
+    import app.mail_sender as mail
+
+    real = mail.send_email
+
+    def leaky(settings, token, to, subject, body, cc=(), post=None):
+        try:
+            real(settings, token, to, subject, body, cc, post)
+        except mail.MailError as error:
+            raise mail.MailError(f"{error} at {mail.SEND_URL.format(sender=mail.quote(settings.sender, safe=''))}") from None
+
+    monkeypatch.setattr("app.reminders.send_email", leaky)
+    code, *_ = go(["--only", "7"], answers=["yes"])
+    assert code == 1 and "[FAILED] no sender address and no secret is in the report" in capsys.readouterr().out
+
+
+def test_the_check_notices_when_microsoft_accepts_a_wrong_sender(capsys):
+    code, *_ = go(["--only", "7"], answers=["yes"], web=AcceptsAnything())
+    out = capsys.readouterr().out
+    assert code == 1 and "[FAILED] every email was tried and every one failed" in out
+
+
+def test_the_check_notices_when_microsoft_accepts_a_wrong_secret(capsys):
+    code, *_ = go(["--only", "8"], answers=["yes"], web=AcceptsAnything())
+    out = capsys.readouterr().out
+    assert code == 1 and "[FAILED] the run stops with an error and exit code 1" in out
+
+
+def test_the_check_notices_when_a_failed_email_is_logged_as_sent(capsys, monkeypatch):
+    import app.reminders_send as send_module
+
+    real = send_module.deliver
+
+    def logging_failures(plan, send, log=None, stamp=None, **kwargs):
+        def lenient(to, subject, body, cc):
+            try:
+                send(to, subject, body, cc)
+            except send_module.MailError:
+                pass          # pretends it went
+        return real(plan, lenient, log=log, stamp=stamp, **kwargs)
+
+    monkeypatch.setattr("app.reminders.deliver", logging_failures)
+    code, *_ = go(["--only", "7"], answers=["yes"])
+    out = capsys.readouterr().out
+    assert code == 1 and "FAILED" in out
+
+
+def test_the_check_notices_when_the_command_goes_on_after_a_failed_sign_in(capsys, monkeypatch):
+    monkeypatch.setattr("app.reminders.get_access_token", lambda settings, post=None: "token-anyway")
+    code, *_ = go(["--only", "8"], answers=["yes"])
     out = capsys.readouterr().out
     assert code == 1 and "FAILED" in out
