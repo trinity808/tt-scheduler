@@ -21,7 +21,7 @@ import pytest
 
 from app.exam_date import parse_exam_date
 from app.reminder_rules import DAY_1, DAY_3, DAY_5, DAY_8, DAY_10, DAY_11_OVERDUE, decide_reminders
-from tests.fakes import FakeWorksheet
+from tests.google_like import GoogleLikeWorksheet
 
 import scripts.check_reminders_live as live
 
@@ -61,7 +61,7 @@ def alerts_are_off(monkeypatch):
     monkeypatch.setattr("app.config_loader.load_config", lambda: {"health_check": {"email_notifications_enabled": False}})
 
 
-class Tab(FakeWorksheet):
+class Tab(GoogleLikeWorksheet):
     """A worksheet that knows its title, as a real one does."""
 
     def __init__(self, title, rows, row_count=1000):
@@ -755,6 +755,7 @@ def test_the_groups_are_named_and_numbered_as_the_checklist_has_them():
     assert groups["quiet"] == ((3, 9, 11), False)
     assert groups["test-mode"] == ((6, 10), True)
     assert groups["failures"] == ((7, 8), True)
+    assert groups["sends"] == ((1, 2, 4, 5), True)
 
 
 @pytest.mark.parametrize(
@@ -762,7 +763,8 @@ def test_the_groups_are_named_and_numbered_as_the_checklist_has_them():
     [("3", ["quiet"]), ("9", ["quiet"]), ("3,9", ["quiet"]), ("6", ["test-mode"]), ("10", ["test-mode"]),
      ("6,10", ["test-mode"]), ("3,6", ["quiet", "test-mode"]), ("test-mode,quiet", ["quiet", "test-mode"]),
      ("7", ["failures"]), ("8", ["failures"]), ("7,8", ["failures"]), ("11", ["quiet"]),
-     ("failures,plumbing", ["plumbing", "failures"])],
+     ("failures,plumbing", ["plumbing", "failures"]),
+     ("1", ["sends"]), ("2", ["sends"]), ("4", ["sends"]), ("5", ["sends"]), ("1,2,4,5", ["sends"]), ("sends,quiet", ["quiet", "sends"])],
 )
 def test_scenarios_and_groups_choose_the_groups_that_hold_them(only, expected):
     assert [g[0] for g in live.choose_groups(only)] == expected
@@ -1060,3 +1062,156 @@ def test_the_check_notices_when_the_command_goes_on_after_a_failed_sign_in(capsy
     code, *_ = go(["--only", "8"], answers=["yes"])
     out = capsys.readouterr().out
     assert code == 1 and "FAILED" in out
+
+
+# --- Chunk D1: scenarios 1, 2, 4 and 5, and the list of what to look for in the inboxes --------------
+
+
+def accepted(first_to=(), cc=(), subject="S", status=202):
+    return live.Sent(to=list(first_to), cc=list(cc), subject=subject, status=status)
+
+
+def outbox_with(*emails):
+    outbox = live.Outbox()
+    outbox.sent.extend(emails)
+    return outbox
+
+
+def test_the_inbox_list_names_what_each_address_should_hold_and_marks_copies():
+    outbox = outbox_with(
+        accepted([SMITH], subject="Case A"),
+        accepted([SMITH], [DOE], subject="OVERDUE: B"),
+        accepted([DOE], subject="Case C"),
+    )
+    text = live.inbox_summary(outbox, people())
+    assert f"{SMITH}  (Dr. Smith): 2 email(s)" in text and f"{DOE}  (Dr. Doe): 2 email(s)" in text
+    assert "- OVERDUE: B  (copied)" in text.split(DOE)[1] and "(copied)" not in text.split(DOE)[0]
+    assert "should hold 3 email(s)" in text
+
+
+def test_the_inbox_list_counts_only_what_microsoft_accepted():
+    outbox = outbox_with(accepted([SMITH], subject="Went"), accepted([SMITH], subject="Refused", status=404))
+    text = live.inbox_summary(outbox, people())
+    assert "Went" in text and "Refused" not in text and "should hold 1 email(s)" in text
+
+
+def test_the_inbox_list_is_empty_when_nothing_was_sent():
+    assert live.inbox_summary(live.Outbox(), people()) == ""
+    assert live.inbox_summary(outbox_with(accepted([SMITH], status=401)), people()) == ""
+
+
+def test_the_inbox_list_matches_addresses_without_regard_to_capitals():
+    text = live.inbox_summary(outbox_with(accepted([SMITH.upper()])), people())
+    assert f"{SMITH}  (Dr. Smith): 1 email(s)" in text
+
+
+def test_the_script_prints_the_inbox_list_after_a_group_that_sends(capsys):
+    code, *_ = go(["--only", "test-mode"], answers=["yes"])
+    out = capsys.readouterr().out
+    assert code == 0 and "What to look for in the inboxes" in out and "should hold 6 email(s)" in out
+    assert out.index("Scratch tabs deleted.") < out.index("What to look for in the inboxes") < out.index("checks passed.")
+
+
+def test_a_group_that_sends_nothing_prints_no_inbox_list(capsys):
+    go(["--only", "quiet"])
+    assert "What to look for in the inboxes" not in capsys.readouterr().out
+
+
+def test_the_sends_group_asks_first_and_does_nothing_on_no(capsys):
+    code, book, web, questions = go(["--only", "sends"], answers=["no"])
+    assert code == 2 and len(questions) == 1 and web.calls == [] and book.added == []
+
+
+def test_the_sends_group_sends_five_emails_in_two_runs_and_only_to_the_test_addresses(capsys):
+    code, book, web, _ = go(["--only", "sends"], answers=["yes"])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    emails, signins = sends_and_signins(web)
+    assert len(emails) == 5 and len(signins) == 2           # the first run and the run with the new case; the rerun signs in to nothing
+    for sent in emails:
+        assert set(a.casefold() for a in addresses(sent)) <= {SMITH, DOE}
+        assert not sent["subject"].startswith("[TEST]")
+    assert sorted(book.tabs) == ["Contacts", "Ongoing"]
+
+
+def test_the_psychometrists_address_is_on_the_row_but_on_no_email_that_is_not_the_directors_copy(capsys):
+    _, _, web, _ = go(["--only", "sends"], answers=["yes"])
+    emails, _ = sends_and_signins(web)
+    for sent in emails:
+        if "LC-91" in sent["subject"] or "LC-93" in sent["subject"]:
+            assert addresses(sent) == [SMITH]
+
+
+@pytest.mark.parametrize("now", MONDAY_TO_FRIDAY)
+def test_the_sends_group_passes_on_every_weekday(capsys, now):
+    code, *_ = go(["--only", "sends"], answers=["yes"], now=now)
+    assert code == 0, capsys.readouterr().out
+
+
+def test_everything_together_still_passes_and_asks_once_with_the_sends_group(capsys):
+    code, book, web, questions = go([], answers=["yes"])
+    out = capsys.readouterr().out
+    assert code == 0 and len(questions) == 1 and "FAILED" not in out
+    emails, _ = sends_and_signins(web)
+    assert len(emails) == 6 + 6 + 5                         # test-mode, failures, sends
+    assert sorted(book.tabs) == ["Contacts", "Ongoing"]
+
+
+def test_the_check_notices_when_the_psychometrist_is_emailed(capsys, monkeypatch):
+    import app.reminders_send as send_module
+
+    real = send_module.deliver
+
+    def to_everyone(plan, send, **kwargs):
+        def widened(to, subject, body, cc):
+            send(to, subject, body, tuple(cc) + ((DOE,) if "LC-91" in subject else ()))
+        return real(plan, widened, **kwargs)
+
+    monkeypatch.setattr("app.reminders.deliver", to_everyone)
+    code, *_ = go(["--only", "sends"], answers=["yes"])
+    out = capsys.readouterr().out
+    assert code == 1 and "[FAILED] the second address, listed as psychometrist" in out
+
+
+def test_the_check_notices_when_the_director_is_copied_on_another_reminder(capsys, monkeypatch):
+    import app.reminders_send as send_module
+
+    real = send_module.deliver
+
+    def copying(plan, send, **kwargs):
+        def widened(to, subject, body, cc):
+            send(to, subject, body, tuple(cc) + ((DOE,) if "LC-93" in subject else ()))
+        return real(plan, widened, **kwargs)
+
+    monkeypatch.setattr("app.reminders.deliver", copying)
+    code, *_ = go(["--only", "sends"], answers=["yes"])
+    assert code == 1 and "[FAILED] only the overdue notice copies the Director" in capsys.readouterr().out
+
+
+def test_the_check_notices_when_nothing_is_logged_after_a_send(capsys, monkeypatch):
+    monkeypatch.setattr("app.reminders_sent_log.SentLog.record", lambda self, *a, **k: None)
+    code, *_ = go(["--only", "sends"], answers=["yes"])
+    out = capsys.readouterr().out
+    assert code == 1 and "[FAILED] it holds one row for each email sent" in out and "[FAILED] the same run again finds all four already sent" in out
+
+
+def test_the_check_notices_when_an_address_is_logged_instead_of_a_name(capsys, monkeypatch):
+    from app.reminders_sent_log import SentLog
+
+    real = SentLog.record
+
+    def with_address(self, case_id, key, recipient, when):
+        return real(self, case_id, key, f"{recipient} <{SMITH}>", when)
+
+    monkeypatch.setattr("app.reminders_sent_log.SentLog.record", with_address)
+    code, *_ = go(["--only", "sends"], answers=["yes"])
+    assert code == 1 and "[FAILED] the recipient column holds the provider's name" in capsys.readouterr().out
+
+
+def test_the_check_notices_when_the_log_stamps_the_wrong_time(capsys, monkeypatch):
+    import app.reminders as reminders
+
+    real = reminders.arizona_now
+    monkeypatch.setattr(reminders, "arizona_now", lambda now=None: real(now) - timedelta(hours=3))
+    code, *_ = go(["--only", "sends"], answers=["yes"])
+    assert code == 1 and "[FAILED] each row has the Arizona date and time" in capsys.readouterr().out

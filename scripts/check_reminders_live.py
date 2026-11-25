@@ -40,6 +40,11 @@ three groups:
              and logging nothing, and the lock; sends about six test emails
   failures   scenarios 7 and 8: a wrong sender and a wrong secret, which Microsoft
              refuses, then a run that sends what failed; sends three real (unmarked) emails
+  sends      scenarios 1, 2, 4 and 5: a real send to four cases, where each goes, that a
+             psychometrist's address is never used, the Director copy, the log rows, a
+             rerun that sends nothing, and a case added afterwards; sends five real emails
+
+After any group that sends, the script lists what each test inbox should hold.
 
 Run from the project root:
     python -m scripts.check_reminders_live --plan      what it would do, touching nothing
@@ -49,6 +54,7 @@ Run from the project root:
     python -m scripts.check_reminders_live --only quiet
     python -m scripts.check_reminders_live --only test-mode     asks for yes first
     python -m scripts.check_reminders_live --only failures      asks for yes first
+    python -m scripts.check_reminders_live --only sends         asks for yes first
     python -m scripts.check_reminders_live --only 6,10
 """
 
@@ -64,7 +70,7 @@ import uuid
 from pathlib import Path
 from urllib.parse import quote
 from dataclasses import dataclass, field, replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import gspread
 import requests
@@ -80,6 +86,7 @@ from app.reminder_rules import (
     DAY_8,
     DAY_10,
     DAY_11_OVERDUE,
+    arizona_now,
     arizona_today,
     decide_reminders,
 )
@@ -91,6 +98,7 @@ from app.reminders_sheet import (
     ONGOING_TAB,
     PROVIDER,
     PROVIDER_EMAIL,
+    SENT_HEADERS,
     SENT_TAB,
 )
 
@@ -901,12 +909,149 @@ def check_failures(ctx):
     check_wrong_secret(ctx)
 
 
+# --- Group "sends": scenarios 1, 2, 4 and 5, a real send to several cases ----------
+
+
+def arizona_clock(ctx):
+    """The moment the run's log stamps are compared with: the time given to the script, or the real one."""
+    return arizona_now(ctx.now or datetime.now(timezone.utc))
+
+
+def log_table(ctx):
+    """The scratch Reminders Sent tab as a table with its header, or None if there is none."""
+    for tab in ctx.sheet.worksheets():
+        if tab.title == PREFIX + SENT_TAB:
+            return tab.get_all_values()
+    return None
+
+
+def addresses_of(email):
+    return [a.casefold() for a in email.to + email.cc]
+
+
+def case_of(email, case_ids):
+    """The case an email is about, read from its subject, or None."""
+    found = [i for i in case_ids if f"DDS case {i}" in email.subject]
+    return found[0] if len(found) == 1 else None
+
+
+def check_sends(ctx):
+    print("  -- scenarios 1, 2, 4, 5: a real send to several cases, and what a rerun does")
+    first, second = ctx.first, ctx.second
+    mine = dict(psychometrist=second.listed, psychometrist_email=second.email)
+    cases = [
+        make_case("LC-91", DAY_1, ctx.today, first, **mine),
+        make_case("LC-92", DAY_5, ctx.today, second),
+        make_case("LC-93", DAY_10, ctx.today, first, **mine),
+        make_case("LC-94", DAY_11_OVERDUE, ctx.today, first, **mine),
+    ]
+    ids = [c.case_id for c in cases]
+    keys = {"LC-91": "DAY_1", "LC-92": "DAY_5", "LC-93": "DAY_10", "LC-94": "DAY_11_OVERDUE"}
+    owner = {"LC-91": first, "LC-92": second, "LC-93": first, "LC-94": first}
+    stand_in = scratch(ctx, cases)
+
+    start, tokens = len(ctx.outbox.sent), ctx.outbox.tokens
+    outcome = run_reminders(stand_in, ["--live"], ctx.env, ctx.post, ctx.work, ctx.now)
+    show(outcome.output)
+    report = outcome.output
+    sent = emails_since(ctx, start)
+    by_case = {case_of(e, ids): e for e in sent}
+    check("the run ended normally and sent all four", outcome.exit_code == 0 and outcome.error is None and "Sent (4):" in report and len(sent) == 4 and set(by_case) == set(ids), f"{outcome.exit_code} {outcome.error!r}")
+    check("every email was accepted by Microsoft, after one sign-in", all(e.status == 202 for e in sent) and ctx.outbox.tokens == tokens + 1)
+    check("none is marked as a test", not any(e.subject.startswith("[TEST]") for e in sent))
+
+    print("  -- scenario 1: each email goes to its provider's own address")
+    check(
+        "each case's email went to its provider, and to no one else as the main recipient",
+        all([a.casefold() for a in by_case[i].to] == [owner[i].email.casefold()] for i in ids if i in by_case),
+    )
+
+    print("  -- scenario 2: a psychometrist's address is never used")
+    check(
+        "the second address, listed as psychometrist on three cases, is on none of the emails for LC-91 and LC-93",
+        all(second.email.casefold() not in addresses_of(by_case[i]) for i in ("LC-91", "LC-93")),
+    )
+    check(
+        "so the second address received exactly two emails: its own case, and the Director copy",
+        sorted(i for i in ids if i in by_case and second.email.casefold() in addresses_of(by_case[i])) == ["LC-92", "LC-94"],
+    )
+
+    print("  -- scenario 4: the Director copy")
+    check(
+        "only the overdue notice copies the Director, and the copy goes to the staff address",
+        by_case["LC-94"].cc == [second.email] and all(by_case[i].cc == [] for i in ids if i != "LC-94"),
+    )
+    check("the overdue notice says the Director is copied", "The Director is copied on this notice." in by_case["LC-94"].body)
+
+    print("  -- scenario 5: the log")
+    table = log_table(ctx)
+    check("the Reminders Sent tab was made with its headers", table is not None and table[0] == list(SENT_HEADERS), f"{table and table[0]}")
+    rows = (table or [[]])[1:]
+    check("it holds one row for each email sent, with the reminder's name", sorted((r[0], r[1]) for r in rows) == sorted((i, keys[i]) for i in ids), f"{rows}")
+    check("the recipient column holds the provider's name, not an address", sorted((r[0], r[2]) for r in rows) == sorted((i, owner[i].typed) for i in ids) and not any("@" in cell for r in rows for cell in r))
+    stamps_ok = True
+    for row in rows:
+        try:
+            stamped = datetime.strptime(f"{row[3]} {row[4]}", "%Y-%m-%d %H:%M:%S")
+            stamps_ok &= abs((stamped - arizona_clock(ctx).replace(tzinfo=None)).total_seconds()) < 15 * 60
+        except (ValueError, IndexError):
+            stamps_ok = False
+    check("each row has the Arizona date and time it was sent, within minutes of now", bool(rows) and stamps_ok, f"{rows}")
+    check("the lock was given back", not os.path.exists(os.path.join(ctx.work, "reminders.lock")))
+
+    print("  -- scenario 5: a rerun sends nothing, and a new case sends alone")
+    start, tokens = len(ctx.outbox.sent), ctx.outbox.tokens
+    outcome = run_reminders(stand_in, ["--live"], ctx.env, ctx.post, ctx.work, ctx.now)
+    show(outcome.output)
+    check(
+        "the same run again finds all four already sent and sends nothing",
+        outcome.exit_code == 0 and "Already sent (4):" in outcome.output and "Sent: nothing today." in outcome.output and nothing_went_out(ctx, start, tokens),
+        outcome.output[:300],
+    )
+    check("and writes nothing new to the log", (log_table(ctx) or [])[1:] == rows)
+
+    newcomer = make_case("LC-95", DAY_8, ctx.today, first)
+    write_table(stand_in.worksheet(ONGOING_TAB), [ONGOING_HEADERS] + [c.row() for c in cases + [newcomer]])
+    outcome = run_reminders(stand_in, ["--live"], ctx.env, ctx.post, ctx.work, ctx.now)
+    show(outcome.output)
+    later = emails_since(ctx, start)
+    check(
+        "a case added afterwards is sent on its own, and the four are still skipped",
+        outcome.exit_code == 0 and "Sent (1):" in outcome.output and "Already sent (4):" in outcome.output and len(later) == 1 and case_of(later[0], ids + ["LC-95"]) == "LC-95",
+        outcome.output[:300],
+    )
+    now_rows = (log_table(ctx) or [])[1:]
+    check("and the log now has five rows", len(now_rows) == 5 and ("LC-95", "DAY_8") in [(r[0], r[1]) for r in now_rows], f"{now_rows}")
+
+
+def inbox_summary(outbox, people):
+    """
+    What to look for in the inboxes after the run: for each test address, the emails Microsoft
+    accepted for it, and how many the sending mailbox's Sent Items should hold. An empty
+    string if nothing was sent.
+    """
+    accepted = [e for e in outbox.sent if e.status == 202]
+    if not accepted:
+        return ""
+    lines = ["What to look for in the inboxes (only emails Microsoft accepted are counted):"]
+    for person in people:
+        mail = person.email.casefold()
+        theirs = [e for e in accepted if mail in [a.casefold() for a in e.to + e.cc]]
+        lines.append(f"  {person.email}  ({person.typed}): {len(theirs)} email(s)")
+        for e in theirs:
+            copied = mail not in [a.casefold() for a in e.to]
+            lines.append(f"    - {e.subject}" + ("  (copied)" if copied else ""))
+    lines.append(f"  The Sent Items of the sending mailbox should hold {len(accepted)} email(s) from this run.")
+    return "\n".join(lines)
+
+
 # name, the scenarios in it (numbers from the checklist), whether it sends real email, its function
 GROUPS = [
     ("plumbing", (), False, check_plumbing),
     ("quiet", (3, 9, 11), False, check_quiet),
     ("test-mode", (6, 10), True, check_test_mode),
     ("failures", (7, 8), True, check_failures),
+    ("sends", (1, 2, 4, 5), True, check_sends),
 ]
 
 
@@ -1046,6 +1191,9 @@ def main(argv=None, sheet=None, ask=input, post=None, now=None, environ=None):
 
     left = [t.title for t in sheet.worksheets() if t.title.startswith(PREFIX)]
     check("no scratch tab is left behind", left == [], f"left {left}")
+    summary = inbox_summary(outbox, people)
+    if summary:
+        print("\n" + summary)
     print(f"\n{sum(results)} of {len(results)} checks passed.")
     return 0 if all(results) else 1
 
