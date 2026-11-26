@@ -90,6 +90,7 @@ The project also has a newer second part: tracking each case in a Google Sheet. 
 │   ├── check_case_metadata.py    # Live check of the stored original lists, on a scratch tab
 │   ├── check_screenshot_to_finished.py # Runs the screenshot matcher (preview by default)
 │   ├── check_sweep_live.py       # Live check of the sweep on scratch tabs: scenarios 1 to 16 and 19
+│   ├── check_reminders_live.py   # Live check of the reminders: scratch tabs, two test inboxes
 │   └── check_sheet_connection.py # Live check against your own sandbox sheet
 ├── templates/                    # Local only, not in the repository (see below)
 ├── testing pdfs/                 # Local only, not in the repository (see below)
@@ -1037,7 +1038,7 @@ This opens the sheet set in `.env` and prints its tabs and their headers. It doe
 python -m scripts.check_case_metadata
 ```
 
-This runs the stored-original-tests code against the real Google Sheets API, on a scratch tab named `MetadataCheck` that it creates and deletes. It checks that entries can be saved, replaced, and read back, and that they follow their rows through inserts, sorts, and deletes. It also checks the tab with sheet ID 0 (the first tab created with a spreadsheet), which the API describes differently from every other tab. Run it after changing the storage code, and once against any new spreadsheet. It needs `-m`, because it imports from `app/`.
+This runs the stored-original-tests code against the real Google Sheets API, on a scratch tab named `MetadataCheck` that it creates and deletes. It checks that entries can be saved, replaced, and read back, and that they follow their rows through inserts, sorts, and deletes. It also checks the tab with sheet ID 0 (the first tab created with a spreadsheet), which the API describes differently from every other tab. Run it after changing the storage code, and once against any new spreadsheet. It needs `-m`, because it imports from `app/`. The reminders have their own live check, which sends real email to two addresses you choose: see [the live check of the reminders](#live-check-of-the-reminders).
 
 ### Trying the DOCX pipeline by hand
 
@@ -1119,6 +1120,61 @@ Scenario 19 runs the real `move_case_to_finished` with a worksheet whose delete 
 - The screenshot matcher, the DOCX pipeline, and Task Scheduler.
  
 The helpers that need no Google (the request pacer and its retry, choosing which scenarios to run, and picking a case out of a report) are tested in `tests/test_check_sweep_live.py`, which runs with the rest of the suite.
+
+### Live check of the reminders
+ 
+`scripts/check_reminders_live.py` runs the reminders command against the real Google Sheets API and, for the groups that send, the real Microsoft account, so a change to the reminders can be re-verified in one command. Use your own sandbox sheet, never production.
+ 
+**Before the first run**
+ 
+1. In the sandbox sheet's `Contacts` tab, have two rows named `Dr. Jane Smith` and `Dr. John Doe` (or pick other names with `--providers "Name One,Name Two"`), and put **your own two email addresses** on them. Those are the only people it can ever email.
+2. Have the four Microsoft settings in `.env` (see [Microsoft Graph Setup](#microsoft-graph-setup)). The groups that don't send don't need them.
+3. Run it on a weekday. On a weekend no reminder is sent, so it refuses to start.
+ 
+```bash
+python -m scripts.check_reminders_live --list              # show the groups, and touch nothing
+python -m scripts.check_reminders_live --plan              # what it would do, and touch nothing
+python -m scripts.check_reminders_live --only plumbing     # one group
+python -m scripts.check_reminders_live --only 6,10         # just these scenarios, with their groups
+python -m scripts.check_reminders_live                     # everything
+```
+ 
+It prints the sandbox sheet's title first, then each check as `[OK]` or `[FAILED]`, then ends with a count. The exit code is 0 only if every check passed. A `[NOTE]` is something to read, and counts as neither.
+ 
+**Groups.** Each group runs on scratch tabs of its own, so it can be run alone. Asking for one scenario runs its whole group, and says so.
+ 
+| Group | Scenarios | What it shows | Emails |
+|---|---|---|---|
+| `plumbing` | | A preview of the made-up cases, and that a provider who isn't found stops it | none |
+| `quiet` | 3, 9, 11 | A due reminder with no usable address, a `Reminders Sent` tab that is damaged or filled in by hand, and whether failure alerts are on | none |
+| `test-mode` | 6, 10 | `--live --test`: `[TEST]` emails to the first provider only, nobody copied, nothing logged; and the lock | about 6, all marked `[TEST]` |
+| `failures` | 7, 8 | A wrong sender and a wrong secret, which Microsoft refuses; then a run that sends what failed | 3, real |
+| `sends` | 1, 2, 4, 5 | A real send to four cases: each goes to its own provider, a psychometrist's address is never used, only the overdue notice copies the Director, the log rows, a rerun that sends nothing, and a case added afterwards | 5, real |
+ 
+**The `yes` prompt.** Before any group that sends, it shows the sandbox sheet's title and the two addresses, and waits for you to type `yes`. Anything else ends the run with nothing sent.
+ 
+**How it stays safe**
+ 
+- It works only on scratch tabs that it creates, named `ReminderCheck ...`, and deletes them at the end, even when a check fails. A scratch tab left by a run that was cut off is removed at the start of the next one.
+- The reminders command is handed a stand-in spreadsheet that maps `Ongoing`, `Finished` and `Reminders Sent` to the scratch tabs and refuses every other name, so it can't reach a real tab. The only real tab it reads is `Contacts`, once, to find the two providers.
+- Every case is made up by the script. Your `.env` is read for the Microsoft settings and never changed. For the run, real sending is switched on, the test address is the first provider, and the Director copy goes to the second, so the Director's real address in `.env` is never emailed.
+- Every request to Microsoft goes through a guard that blocks an email sent or copied to anyone but the two providers, and any address that isn't Microsoft's, whatever the rest of the script does.
+- It refuses to run unless the sheet's title contains `sandbox`.
+- It runs the command from a temporary folder, so its lock file and logs never touch the project folder.
+ 
+**After a group that sends: check the inboxes.** The script ends with a list of what each of the two inboxes should now hold, per case and subject. Open both inboxes, and the `Sent Items` of the sending mailbox, and compare the counts. A real run is only proven when the mail arrived, and Microsoft accepting an email (`202`) is not proof of that.
+ 
+**Reading a failure.** The command's report is printed above the checks, and a failing check says what it expected and what it found. Compare that with the scenario. A mismatch is either a bug, or a rule worth changing on purpose. If it is a rule, change the code, the tests, the README and the script together.
+ 
+**Why it takes a while.** Google allows 60 read requests a minute, so every request goes through the same pacer as the sweep's check. Lines such as `(pausing 51 s to stay under Google's per-minute request limit)` are normal.
+ 
+**What it doesn't cover**
+ 
+- The wording of the emails. The tests check what each email says. Dr. approves the wording.
+- That the Mail.Send permission is limited to the support mailbox (an Exchange policy, set by an admin).
+- Task Scheduler, and a reminder missed because the command didn't run that day (see Known gaps).
+ 
+The parts that need no Google or Microsoft (choosing groups, the guards, the stand-in spreadsheet, the checks themselves, run against fakes) are tested in `tests/test_check_reminders_live.py`, which runs with the rest of the suite.
 
 ## Troubleshooting
 
@@ -1322,6 +1378,7 @@ Use your own Dropbox app and your own copy of the sheet while developing. Produc
 - "The report is in" means the case is in Finished. A report that has been submitted but whose screenshot hasn't been matched yet looks unsubmitted, so that provider is still reminded.
 - Only providers are reminded (phase 1). A case where a practicum student took part is reminded through the provider named on the case.
 - An exam date that can't be read from `Date & Time` is reported on every run until it is fixed.
+- **Failure alerts by email are off.** `health_check.email_notifications_enabled` is not `true` in `config/settings.json`, so a reminders run that fails (exit code 1) is only printed and logged, and nobody is emailed. The live check's scenario 11 reports this as a `[NOTE]`. Turn it on once Dr. has decided who is told.
 
 ### Contributing
 
