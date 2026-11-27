@@ -246,19 +246,19 @@ The app needs the **Mail.Send** permission, as an *application* permission, with
 consent given for the tenant. It signs in to `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token`
 asking for `https://graph.microsoft.com/.default`.
  
-**Who has what.** To be filled in:
+**Who has what.**:
  
 | | |
 |---|---|
-| App registration (name, and who owns it) | TBA |
-| Client secret expires on | TBA |
-| Admin consent for Mail.Send given by | TBA |
-| Sending mailbox | the account in `MICROSOFT_SENDER_EMAIL` (expected to be the support account; TBA) |
+| App registration (and who owns it) | An app registered in Microsoft Entra ID, owned by the support account (Trinity Tree Support). No named person owns it, so nobody is personally told when its secret expires |
+| Client secret in use | `TT Scheduler Email`, expires **10 November 2028**. Confirmed from the app's sign-in logs, which show the key ID of the secret each sign-in used |
+| Other client secret | `TT scheduler`, expires 2 April 2027. Not used by the reminders, so its expiry changes nothing for them. Ask Sukanya whether anything else uses it before deleting it |
+| Mail.Send permission | Application permission, admin consent granted for the tenant (Entra, API permissions, status "Granted"). A Delegated Mail.Send entry also exists, is not granted, and isn't used |
+| Sending mailbox | `support@trinitytreepsych.com`, the account in `MICROSOFT_SENDER_EMAIL` |
 | Support account sign-in | 2-step verification is on Dr.'s phone |
  
 **The secret expires.** When it does, every send fails at sign-in, with nothing sent and an
-alert (`Microsoft sign-in failed`, usually `invalid_client`). Put a reminder in a calendar a
-month before the date above. To replace it:
+alert (`Microsoft sign-in failed`, usually `invalid_client`). Put a reminder in a person's calendar a month before the date above (for the current secret, 10 October 2028), since the app has no named owner to be told. To replace it:
  
 1. In the Microsoft Entra admin center, open the app registration, then Certificates &
    secrets, and choose New client secret.
@@ -1372,7 +1372,7 @@ Use your own Dropbox app and your own copy of the sheet while developing. Produc
 - If a row can't be written to `Reminders Sent`, the run stops and the row has to be added by
   hand, or the next run sends that reminder again.
 - Microsoft accepting an email isn't proof it arrived. Bounces and undelivered emails aren't detected.
-- The Microsoft client secret expires (date: TBA, see Microsoft Graph Setup), and Mail.Send isn't yet limited to the one mailbox.
+- The Microsoft client secret expires (10 November 2028, see Microsoft Graph Setup), and Mail.Send isn't yet limited to the one mailbox.
 - Each reminder goes out on its own day only. Runs are manual, so a day with no run loses that day's reminder, and the report doesn't yet say what was missed.
 - The Day 3 reminder is never sent: it goes only if materials aren't uploaded, and nothing tracks that yet. It is listed in the report as held back. Day 1 is sent regardless.
 - "The report is in" means the case is in Finished. A report that has been submitted but whose screenshot hasn't been matched yet looks unsubmitted, so that provider is still reminded.
