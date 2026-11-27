@@ -93,9 +93,18 @@ def _require(tab_name, headers, needed, consequence):
     return columns
 
 
+def tab_is_blank(rows):
+    """
+    Whether a tab has nothing in it. Google gives a blank tab back as [[]], one empty row,
+    where an in-memory fake says []; a tab someone cleared can also come back as a row of
+    empty cells. All of those are blank. A tab with a blank first row but data below it is not.
+    """
+    return not any(str(cell).strip() for row in rows for cell in row)
+
+
 def _read_ongoing(worksheet, data):
     rows = worksheet.get_all_values()
-    if not rows:
+    if tab_is_blank(rows):
         raise ValueError("The Ongoing tab is empty: it has no header row")
     columns = _require(
         ONGOING_TAB,
@@ -131,7 +140,7 @@ def _read_ongoing(worksheet, data):
 
 def _read_finished(worksheet, data):
     rows = worksheet.get_all_values()
-    if not rows:
+    if tab_is_blank(rows):
         return  # nothing finished yet
     columns = _require(
         FINISHED_TAB, rows[0], [CASE_ID],
@@ -150,8 +159,8 @@ def _read_sent(spreadsheet, data):
         data.log_found = False
         return
     rows = worksheet.get_all_values()
-    if not rows:
-        return
+    if tab_is_blank(rows):
+        return  # nothing sent yet
     columns = _require(
         SENT_TAB, rows[0], [CASE_ID, SENT_REMINDER],
         "so the reminders can't tell what was already sent. Row 1 of the tab needs "

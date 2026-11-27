@@ -1,11 +1,11 @@
 """
 Tests for the reminders preview: planning which reminders are due (app/reminders.py),
-the report it prints (app/reminders_report.py), and the command line, main().
+the report it prints (app/reminders_report.py), and the command line, main(), when it 
+only previews. Sending is tested in tests/test_reminders_live.py.
 
-The command only previews, so every test also checks that nothing was written. The
-logger is shared by the whole process, so each test starts and ends with it clean
-(see tests/log_cleanup.py). It doesn't pass records up to pytest, so the logging tests
-read the log files.
+A preview writes nothing, so every test also checks that. The logger is shared by the 
+whole process, so each test starts and ends with it clean (see tests/log_cleanup.py). 
+It doesn't pass records up to pytest, so the logging tests read the log files.
 
 The calendar used is May 2026, where May 4 is a Monday. Test addresses are made up and
 unique, so a test can check that none of them ever reaches the report or the log.
@@ -28,7 +28,11 @@ from tests.log_cleanup import clean_logger  # noqa: F401
 
 DOE_ADDRESS = "doe.provider.4471@example.test"
 SMITH_ADDRESS = "smith.provider.9902@example.test"
-ADDRESSES = (DOE_ADDRESS, SMITH_ADDRESS)
+DIRECTOR_ADDRESS = "director.copy.7310@example.test"
+ADDRESSES = (DOE_ADDRESS, SMITH_ADDRESS, DIRECTOR_ADDRESS)
+
+# What .env holds, as far as a preview is concerned: the overdue notice needs someone to copy.
+PREVIEW_ENV = {"STAFF_CC_EMAILS": DIRECTOR_ADDRESS}
 
 HEADERS = ["Case ID", "Patient Name", "Date & Time", "Psychometrist", "Psychometrist Email",
            "Provider", "Provider Email", "Comments"]
@@ -328,6 +332,12 @@ def scratch_folder(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
 
+@pytest.fixture(autouse=True)
+def preview_settings(monkeypatch):
+    """A preview reads STAFF_CC_EMAILS from the settings. Give it a made-up one, never the real .env."""
+    monkeypatch.setattr("app.reminders.environment", lambda environ=None: PREVIEW_ENV if environ is None else environ)
+
+
 def config_for(folder):
     return {"health_check": {"log_folder": str(folder)}}
 
@@ -385,8 +395,8 @@ def test_show_text_prints_the_emails(tmp_path, capsys):
     assert "| Hello Dr. Doe," in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("argv", [["--live"], ["--send"], ["--lve"], ["--today"], ["--today", "May 11"], ["--today", "2026-13-01"]])
-def test_there_is_no_way_to_send_yet_and_a_bad_option_or_date_is_refused(tmp_path, argv):
+@pytest.mark.parametrize("argv", [["--send"], ["--lve"], ["--today"], ["--today", "May 11"], ["--today", "2026-13-01"], ["--test"]])
+def test_a_bad_option_or_date_is_refused_and_nothing_is_written(tmp_path, argv):
     book, tabs = world([case("111")])
     with pytest.raises(SystemExit):
         run(tmp_path, argv, book)

@@ -3,4 +3,5 @@ dropbox
 pdfplumber
 python-docx
 gspread
+requests
 tzdata  # timezone data for zoneinfo on Windows (America/Phoenix)

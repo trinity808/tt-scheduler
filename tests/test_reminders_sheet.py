@@ -18,6 +18,7 @@ from app.reminders_sheet import (
     read_reminder_data,
 )
 from tests.fakes import FakeSpreadsheet, FakeWorksheet
+from tests.google_like import GoogleLikeWorksheet
 
 
 ADDRESS = "unique.provider.7731@example.test"
@@ -152,6 +153,14 @@ def test_an_empty_finished_tab_means_nothing_is_finished_yet():
     assert read_reminder_data(book).finished_ids == set()
 
 
+def test_a_blank_finished_tab_as_google_gives_it_back_means_nothing_is_finished_yet():
+    book = FakeSpreadsheet({
+        ONGOING_TAB: FakeWorksheet([ONGOING_HEADERS, ongoing_row()]),
+        FINISHED_TAB: GoogleLikeWorksheet([]),
+    })
+    assert read_reminder_data(book).finished_ids == set()
+
+
 def test_a_finished_tab_without_a_case_id_column_stops_the_run():
     book, _ = sheet(finished=[["Patient Name", "Date Completed"], ["x", "y"]])
     with pytest.raises(ValueError, match="The Finished tab has no 'Case ID' column"):
@@ -231,3 +240,35 @@ def test_reading_writes_nothing_anywhere():
     read_reminder_data(book)
     for tab in tabs.values():
         assert tab.writes == [] and tab.notes == {}
+
+
+# --- A tab with nothing in it, as Google gives it back ([[]], not []) --------------
+
+
+def test_a_blank_ongoing_tab_is_called_empty_not_missing_a_column():
+    book = FakeSpreadsheet({
+        ONGOING_TAB: GoogleLikeWorksheet([]),
+        FINISHED_TAB: FakeWorksheet([FINISHED_HEADERS]),
+    })
+    with pytest.raises(ValueError, match="The Ongoing tab is empty: it has no header row"):
+        read_reminder_data(book)
+
+
+def book_with_log_tab(log_tab):
+    return FakeSpreadsheet({
+        ONGOING_TAB: FakeWorksheet([ONGOING_HEADERS, ongoing_row()]),
+        FINISHED_TAB: FakeWorksheet([FINISHED_HEADERS]),
+        SENT_TAB: log_tab,
+    })
+
+
+def test_a_blank_log_tab_means_nothing_is_sent_yet_and_the_tab_is_found():
+    book = book_with_log_tab(GoogleLikeWorksheet([]))
+    data = read_reminder_data(book)
+    assert data.sent == set() and data.log_found is True and data.notes == []
+
+
+def test_a_log_tab_with_rows_but_a_blank_header_is_still_a_damaged_header():
+    book = book_with_log_tab(GoogleLikeWorksheet([[""] * 5, ["111", "DAY_5", "", "", ""]]))
+    with pytest.raises(ValueError, match="The Reminders Sent tab has no"):
+        read_reminder_data(book)
